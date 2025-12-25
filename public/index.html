@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EPUB → TXT / PDF (client-side)</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; line-height: 1.4; }
+      .card { max-width: 920px; padding: 16px; border: 1px solid #ddd; border-radius: 12px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+      button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .status { margin-top: 10px; color: #333; }
+      textarea { width: 100%; height: 280px; margin-top: 12px; border-radius: 10px; border: 1px solid #ddd; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .hint { color: #666; font-size: 0.95rem; margin-top: 6px; }
+      .small { font-size: 0.9rem; color: #666; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1 style="margin:0 0 6px 0;">EPUB → TXT / PDF</h1>
+      <div class="small">Runs entirely in your browser (Pyodide). Cloudflare Pages compatible (static hosting).</div>
+
+      <div class="row" style="align-items:center;">
+        <input id="file" type="file" accept=".epub,application/epub+zip" />
+        <button id="btnTxt" disabled>Convert → TXT</button>
+        <button id="btnPdf" disabled>Convert → Printable (Save as PDF)</button>
+        <button id="btnHtml" disabled>Download HTML</button>
+        <button id="btnClear">Clear</button>
+      </div>
+
+      <div class="hint">
+        PDF: opens a clean printable view, then use your browser’s “Print” → “Save as PDF”.
+      </div>
+
+      <div id="status" class="status">Loading Python runtime…</div>
+
+      <textarea id="out" placeholder="Output preview will appear here…" spellcheck="false"></textarea>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
