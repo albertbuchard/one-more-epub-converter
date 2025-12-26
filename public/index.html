@@ -19,7 +19,7 @@
   <body>
     <div class="card">
       <h1 style="margin:0 0 6px 0;">EPUB → TXT / PDF</h1>
-      <div class="small">Runs entirely in your browser (Pyodide). Cloudflare Pages compatible (static hosting).</div>
+      <div class="small">Runs entirely in your browser (epub.js). Cloudflare Pages compatible (static hosting).</div>
 
       <div class="row" style="align-items:center;">
         <input id="file" type="file" accept=".epub,application/epub+zip" />
@@ -33,11 +33,12 @@
         PDF: opens a clean printable view, then use your browser’s “Print” → “Save as PDF”.
       </div>
 
-      <div id="status" class="status">Loading Python runtime…</div>
+      <div id="status" class="status">Loading EPUB runtime…</div>
 
       <textarea id="out" placeholder="Output preview will appear here…" spellcheck="false"></textarea>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.88/dist/epub.min.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

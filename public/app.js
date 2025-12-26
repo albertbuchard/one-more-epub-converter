@@ -1,18 +1,16 @@
-// Client-side EPUB conversion using Pyodide.
+// Client-side EPUB conversion using epub.js.
 // Works on Cloudflare Pages because it’s just static files.
-
-import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs";
 
 class AppState {
   constructor() {
-    this.epubBytes = null;
+    this.book = null;
     this.lastHtml = null;
     this.lastTxt = null;
     this.lastBaseName = "book";
   }
 
   resetFileState() {
-    this.epubBytes = null;
+    this.book = null;
     this.lastHtml = null;
     this.lastTxt = null;
     this.lastBaseName = "book";
@@ -62,47 +60,174 @@ class PrintService {
   }
 }
 
-class PyodideRuntime {
-  constructor(pyPath) {
-    this.pyPath = pyPath;
-    this.pyodide = null;
+class EpubRuntime {
+  constructor() {
+    this.ready = false;
   }
 
   async init() {
-    this.pyodide = await loadPyodide();
-    const pySrc = await (await fetch(this.pyPath)).text();
-    this.pyodide.runPython(pySrc);
+    if (!window.ePub) {
+      throw new Error("epub.js failed to load");
+    }
+    this.ready = true;
   }
 
-  runWithBytes(functionName, epubBytes) {
-    if (!this.pyodide) {
-      throw new Error("Python runtime is not initialized");
+  openBook(arrayBuffer) {
+    if (!this.ready) {
+      throw new Error("EPUB runtime not initialized");
     }
-    this.pyodide.globals.set("EPUB_BYTES", epubBytes);
-    try {
-      const result = this.pyodide.runPython(`${functionName}(EPUB_BYTES.to_py())`);
-      return String(result);
-    } finally {
-      try {
-        this.pyodide.globals.delete("EPUB_BYTES");
-      } catch {
-        // Ignore cleanup errors.
+    return window.ePub(arrayBuffer);
+  }
+}
+
+class HtmlTemplateBuilder {
+  buildDocument({ title, bodyHtml }) {
+    const safeTitle = this.escape(title || "EPUB").slice(0, 200);
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${safeTitle}</title>
+  <style>
+    body {
+      font-family: Georgia, "Times New Roman", Times, serif;
+      margin: 42px;
+      line-height: 1.45;
+      color: #111;
+      max-width: 820px;
+    }
+    h1 {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font-size: 20px;
+      margin: 0 0 18px 0;
+    }
+    p { margin: 0 0 12px 0; }
+    @page { margin: 18mm; }
+  </style>
+</head>
+<body>
+  <h1>${safeTitle}</h1>
+  ${bodyHtml}
+</body>
+</html>`;
+  }
+
+  escape(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+}
+
+class TextExtractor {
+  constructor() {
+    this.blockTags = new Set([
+      "p",
+      "div",
+      "section",
+      "article",
+      "header",
+      "footer",
+      "aside",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "ul",
+      "ol",
+      "li",
+      "pre",
+      "blockquote",
+      "hr",
+      "br",
+      "table",
+      "tr",
+    ]);
+  }
+
+  htmlToText(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const parts = [];
+
+    const walker = document.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    let node = walker.nextNode();
+    while (node) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const tag = node.tagName?.toLowerCase();
+        if (tag && this.blockTags.has(tag)) {
+          parts.push("\n");
+        }
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.nodeValue;
+        if (text && text.trim()) {
+          parts.push(text);
+        }
       }
+      node = walker.nextNode();
     }
+
+    return parts
+      .join("")
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t\f\v]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 }
 
 class EpubConverter {
   constructor(runtime) {
     this.runtime = runtime;
+    this.templateBuilder = new HtmlTemplateBuilder();
+    this.textExtractor = new TextExtractor();
   }
 
-  toTxt(epubBytes) {
-    return this.runtime.runWithBytes("epub_to_txt", epubBytes);
+  async loadBook(arrayBuffer) {
+    const book = this.runtime.openBook(arrayBuffer);
+    await book.ready;
+    return book;
   }
 
-  toHtml(epubBytes) {
-    return this.runtime.runWithBytes("epub_to_html", epubBytes);
+  async toHtml(book) {
+    const sections = [];
+    for (const item of book.spine.spineItems) {
+      const section = await item.load(book.load.bind(book));
+      if (section?.document?.body) {
+        sections.push(section.document.body.innerHTML);
+      } else if (section?.contents) {
+        sections.push(section.contents);
+      }
+      section?.unload?.();
+    }
+
+    const bodyHtml = sections.map((html) => `<div class="chapter">${html}</div>`).join("\n");
+    return this.templateBuilder.buildDocument({
+      title: book.package?.metadata?.title || "EPUB",
+      bodyHtml,
+    });
+  }
+
+  async toTxt(book) {
+    const sections = [];
+    for (const item of book.spine.spineItems) {
+      const section = await item.load(book.load.bind(book));
+      if (section?.document?.body) {
+        sections.push(section.document.body.innerHTML);
+      } else if (section?.contents) {
+        sections.push(section.contents);
+      }
+      section?.unload?.();
+    }
+
+    const combinedHtml = sections.join("\n");
+    const text = this.textExtractor.htmlToText(combinedHtml);
+    return text ? `${text}\n` : "";
   }
 }
 
@@ -118,14 +243,14 @@ class EpubApp {
     this.els = els;
     this.state = new AppState();
     this.view = new StatusView(els.status, els.out);
-    this.runtime = new PyodideRuntime("./py/epub_convert.py");
+    this.runtime = new EpubRuntime();
     this.converter = new EpubConverter(this.runtime);
     this.downloader = new DownloadService();
     this.printer = new PrintService();
   }
 
   async init() {
-    this.view.setStatus("Loading Python runtime…");
+    this.view.setStatus("Loading EPUB runtime…");
     await this.runtime.init();
     this.view.setStatus("Ready. Choose an .epub file.");
     this.els.btnTxt.disabled = false;
@@ -153,17 +278,17 @@ class EpubApp {
     this.view.setStatus(`Reading ${file.name}…`);
 
     const buf = await file.arrayBuffer();
-    this.state.epubBytes = new Uint8Array(buf);
+    this.state.book = await this.converter.loadBook(buf);
 
     this.view.setStatus(`Loaded ${file.name}. Choose TXT or Printable.`);
   }
 
-  convertTxt() {
-    if (!this.runtime.pyodide || !this.state.epubBytes) return;
+  async convertTxt() {
+    if (!this.state.book) return;
 
     this.view.setStatus("Converting to TXT…");
     try {
-      this.state.lastTxt = this.converter.toTxt(this.state.epubBytes);
+      this.state.lastTxt = await this.converter.toTxt(this.state.book);
       this.view.setOutput(this.state.lastTxt.slice(0, 200000));
       this.view.setStatus("TXT ready. Downloading…");
       this.downloader.downloadBlob(
@@ -177,12 +302,12 @@ class EpubApp {
     }
   }
 
-  convertHtml() {
-    if (!this.runtime.pyodide || !this.state.epubBytes) return;
+  async convertHtml() {
+    if (!this.state.book) return;
 
     this.view.setStatus("Converting to HTML…");
     try {
-      this.state.lastHtml = this.converter.toHtml(this.state.epubBytes);
+      this.state.lastHtml = await this.converter.toHtml(this.state.book);
       this.view.setOutput("(HTML generated — use Download HTML or Printable)\n");
       this.view.setStatus("HTML ready. Downloading…");
       this.downloader.downloadBlob(
@@ -196,13 +321,13 @@ class EpubApp {
     }
   }
 
-  openPrintable() {
-    if (!this.runtime.pyodide || !this.state.epubBytes) return;
+  async openPrintable() {
+    if (!this.state.book) return;
 
     this.view.setStatus("Building printable view…");
     try {
       if (!this.state.lastHtml) {
-        this.state.lastHtml = this.converter.toHtml(this.state.epubBytes);
+        this.state.lastHtml = await this.converter.toHtml(this.state.book);
       }
       this.view.setStatus("Opening printable view…");
       this.printer.openPrintable(this.state.lastHtml, this.state.lastBaseName);

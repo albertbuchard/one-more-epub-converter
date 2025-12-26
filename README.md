@@ -1,6 +1,6 @@
 # one-more-epub-converter
 
-Client-side EPUB → TXT / printable HTML converter that runs entirely in the browser using Pyodide.
+Client-side EPUB → TXT / printable HTML converter that runs entirely in the browser using epub.js.
 Designed for Cloudflare Pages (static hosting only) with an optional Docker Compose setup for local use.
 
 ## Cloudflare Pages
