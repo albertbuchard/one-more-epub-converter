@@ -80,6 +80,23 @@ class EpubRuntime {
   }
 }
 
+class HtmlSanitizer {
+  constructor() {
+    if (!window.DOMPurify) {
+      throw new Error("DOMPurify failed to load");
+    }
+    this.sanitizer = window.DOMPurify;
+  }
+
+  sanitize(html) {
+    return this.sanitizer.sanitize(html, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["script", "iframe", "object", "embed"],
+      FORBID_ATTR: ["onerror", "onload", "onclick"],
+    });
+  }
+}
+
 class HtmlTemplateBuilder {
   buildDocument({ title, bodyHtml }) {
     const safeTitle = this.escape(title || "EPUB").slice(0, 200);
@@ -182,8 +199,9 @@ class TextExtractor {
 }
 
 class EpubConverter {
-  constructor(runtime) {
+  constructor(runtime, sanitizer) {
     this.runtime = runtime;
+    this.sanitizer = sanitizer;
     this.templateBuilder = new HtmlTemplateBuilder();
     this.textExtractor = new TextExtractor();
   }
@@ -194,19 +212,31 @@ class EpubConverter {
     return book;
   }
 
-  async toHtml(book) {
-    const sections = [];
+  async *iterateSpine(book) {
     for (const item of book.spine.spineItems) {
       const section = await item.load(book.load.bind(book));
-      if (section?.document?.body) {
-        sections.push(section.document.body.innerHTML);
-      } else if (section?.contents) {
-        sections.push(section.contents);
+      try {
+        if (section?.document?.body) {
+          yield section.document.body.innerHTML;
+        } else if (section?.contents) {
+          yield section.contents;
+        } else {
+          yield "";
+        }
+      } finally {
+        section?.unload?.();
       }
-      section?.unload?.();
+    }
+  }
+
+  async toHtml(book) {
+    const sections = [];
+    for await (const rawHtml of this.iterateSpine(book)) {
+      const safeHtml = this.sanitizer.sanitize(rawHtml);
+      sections.push(`<div class="chapter">${safeHtml}</div>`);
     }
 
-    const bodyHtml = sections.map((html) => `<div class="chapter">${html}</div>`).join("\n");
+    const bodyHtml = sections.join("\n");
     return this.templateBuilder.buildDocument({
       title: book.package?.metadata?.title || "EPUB",
       bodyHtml,
@@ -214,19 +244,15 @@ class EpubConverter {
   }
 
   async toTxt(book) {
-    const sections = [];
-    for (const item of book.spine.spineItems) {
-      const section = await item.load(book.load.bind(book));
-      if (section?.document?.body) {
-        sections.push(section.document.body.innerHTML);
-      } else if (section?.contents) {
-        sections.push(section.contents);
+    const chunks = [];
+    for await (const rawHtml of this.iterateSpine(book)) {
+      const safeHtml = this.sanitizer.sanitize(rawHtml);
+      const text = this.textExtractor.htmlToText(safeHtml);
+      if (text) {
+        chunks.push(text, "\n\n");
       }
-      section?.unload?.();
     }
-
-    const combinedHtml = sections.join("\n");
-    const text = this.textExtractor.htmlToText(combinedHtml);
+    const text = chunks.join("").trimEnd();
     return text ? `${text}\n` : "";
   }
 }
@@ -244,7 +270,8 @@ class EpubApp {
     this.state = new AppState();
     this.view = new StatusView(els.status, els.out);
     this.runtime = new EpubRuntime();
-    this.converter = new EpubConverter(this.runtime);
+    this.sanitizer = new HtmlSanitizer();
+    this.converter = new EpubConverter(this.runtime, this.sanitizer);
     this.downloader = new DownloadService();
     this.printer = new PrintService();
   }
