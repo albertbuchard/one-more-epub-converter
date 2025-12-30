@@ -58,3 +58,9 @@ Build output is written to `public/`, which is what Cloudflare Workers serves.
 2. Upload an EPUB that contains multiple chapters and image assets.
 3. Download **Single HTML file** and open the saved `.html` offline — images should render.
 4. Download **ZIP (index.html only)**, unzip it, open `index.html` offline — images should render.
+
+## Testing EPUB image inlining offline
+
+1. Pick an EPUB with multiple images (including relative paths like `../Images/...`).
+2. Convert to **Single HTML file**, disconnect from the internet, then open the file locally.
+3. Confirm there are no `data:text/html` image sources and that every image renders.
