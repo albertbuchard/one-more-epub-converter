@@ -192,7 +192,7 @@ function App() {
   const [outputTab, setOutputTab] = useState("preview");
   const [monospace, setMonospace] = useState(true);
   const [conversion, setConversion] = useState<ConversionState>(defaultConversion);
-  const [htmlExportMode, setHtmlExportMode] = useState<HtmlExportMode>("zip");
+  const [htmlExportMode, setHtmlExportMode] = useState<HtmlExportMode>("inline");
   const [previewInIframe, setPreviewInIframe] = useState(true);
   const [iframeSrc, setIframeSrc] = useState<string>("");
 
@@ -349,7 +349,7 @@ function App() {
       if (result.htmlPreview) {
         setLastHtml(result.htmlPreview);
       }
-      toast.success("HTML project ZIP downloaded.");
+      toast.success("HTML ZIP downloaded.");
     } catch (error) {
       console.error(error);
       toast.error("HTML export failed.");
@@ -595,7 +595,7 @@ function App() {
             <CardHeader>
               <CardTitle className="text-lg">HTML export options</CardTitle>
               <CardDescription>
-                Choose between a project ZIP (index.html + assets) or a self-contained HTML file.
+                Choose between a single self-contained HTML file or a ZIP with the same offline-ready HTML.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -606,7 +606,7 @@ function App() {
                   onClick={() => setHtmlExportMode("zip")}
                   disabled={!book}
                 >
-                  ZIP project (recommended)
+                  ZIP (index.html only)
                 </Button>
                 <Button
                   variant={htmlExportMode === "inline" ? "default" : "outline"}
@@ -614,7 +614,7 @@ function App() {
                   onClick={() => setHtmlExportMode("inline")}
                   disabled={!book}
                 >
-                  Self-contained HTML
+                  Single HTML file
                 </Button>
               </div>
               <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">

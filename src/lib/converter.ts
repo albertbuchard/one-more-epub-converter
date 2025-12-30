@@ -66,6 +66,9 @@ export class HtmlSanitizer {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ["script", "iframe", "object", "embed"],
       FORBID_ATTR: ["onerror", "onload", "onclick"],
+      ADD_ATTR: ["xlink:href"],
+      ALLOWED_URI_REGEXP:
+        /^(?:(?:https?|mailto|ftp|tel|sms|blob):|data:image\/(?:png|jpe?g|gif|webp|svg\+xml)|data:application\/octet-stream|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
     });
   }
 }
@@ -93,6 +96,7 @@ class HtmlTemplateBuilder {
       margin: 0 0 18px 0;
     }
     p { margin: 0 0 12px 0; }
+    img { max-width: 100%; height: auto; }
     @page { margin: 18mm; }
   </style>
 </head>
@@ -116,7 +120,6 @@ type HtmlExportMode = "zip" | "inline";
 
 type AssetRecord = {
   blob: Blob;
-  arrayBuffer: ArrayBuffer;
   mimeType: string;
   resolvedUrl: string;
   normalizedPath: string;
@@ -258,24 +261,17 @@ export class EpubConverter {
     const sections: string[] = [];
     const assetCache = new Map<string, Promise<AssetRecord | null>>();
     const dataUrlCache = new Map<string, Promise<string>>();
-    const cssCache = new Map<string, Promise<{ cssText: string; assetPath: string } | null>>();
-    const zip = options.mode === "zip" ? new JSZip() : null;
-    const assetPathByResolved = new Map<string, string>();
-    const usedAssetPaths = new Set<string>();
+    const cssCache = new Map<string, Promise<string | null>>();
 
     for await (const { html, href } of this.iterateSpine(book)) {
       const safeHtml = this.sanitizer.sanitize(html);
-      const rewritten = await this.rewriteChapterHtml({
+      const rewritten = await this.inlineChapterAssets({
         html: safeHtml,
         sectionHref: href,
         book,
-        mode: options.mode,
         assetCache,
         dataUrlCache,
         cssCache,
-        zip,
-        assetPathByResolved,
-        usedAssetPaths,
       });
       const finalHtml = this.sanitizer.sanitize(rewritten);
       sections.push(`<div class="chapter">${finalHtml}</div>`);
@@ -291,68 +287,39 @@ export class EpubConverter {
       return { html } as const;
     }
 
-    if (!zip) {
-      throw new Error("ZIP export is not available.");
-    }
-
+    const zip = new JSZip();
     zip.file("index.html", html);
-    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
     return { zipBlob, htmlPreview: html } as const;
   }
 
-  private async rewriteChapterHtml({
+  private async inlineChapterAssets({
     html,
     sectionHref,
     book,
-    mode,
     assetCache,
     dataUrlCache,
     cssCache,
-    zip,
-    assetPathByResolved,
-    usedAssetPaths,
   }: {
     html: string;
     sectionHref: string;
     book: EpubBook;
-    mode: HtmlExportMode;
     assetCache: Map<string, Promise<AssetRecord | null>>;
     dataUrlCache: Map<string, Promise<string>>;
-    cssCache: Map<string, Promise<{ cssText: string; assetPath: string } | null>>;
-    zip: JSZip | null;
-    assetPathByResolved: Map<string, string>;
-    usedAssetPaths: Set<string>;
+    cssCache: Map<string, Promise<string | null>>;
   }) {
     const container = document.createElement("div");
     container.innerHTML = html;
 
     const rewriteUrl = async (rawUrl: string | null): Promise<string | null> => {
       if (!rawUrl) return null;
-      const resolved = this.resolveAssetTarget(rawUrl, sectionHref, book);
+      const resolved = this.resolveAssetTarget(rawUrl, sectionHref);
       if (resolved.isExternal || !resolved.normalizedPath) return rawUrl;
 
-      const asset = await this.getAsset(resolved, book, assetCache);
-      if (!asset) {
-        console.warn("Failed to load asset", rawUrl);
-        return rawUrl;
+      if (!dataUrlCache.has(resolved.normalizedPath)) {
+        dataUrlCache.set(resolved.normalizedPath, this.resolveAssetToDataUrl(resolved, book, assetCache));
       }
-
-      if (mode === "inline") {
-        if (!dataUrlCache.has(asset.resolvedUrl)) {
-          dataUrlCache.set(asset.resolvedUrl, this.blobToDataUrl(asset.blob));
-        }
-        return await dataUrlCache.get(asset.resolvedUrl)!;
-      }
-
-      if (!zip) return rawUrl;
-      let assetPath = assetPathByResolved.get(asset.resolvedUrl);
-      if (!assetPath) {
-        const safePath = this.toSafeAssetPath(asset.normalizedPath);
-        assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
-        assetPathByResolved.set(asset.resolvedUrl, assetPath);
-        zip.file(`assets/${assetPath}`, asset.arrayBuffer, { binary: true });
-      }
-      return `assets/${assetPath}`;
+      return await dataUrlCache.get(resolved.normalizedPath)!;
     };
 
     const rewriteSrcset = async (rawValue: string | null) => {
@@ -404,38 +371,30 @@ export class EpubConverter {
       if (!rel.includes("stylesheet")) continue;
       const href = link.getAttribute("href");
       if (!href) continue;
-      const rewritten = await this.rewriteStylesheet({
+      const rewrittenCss = await this.rewriteStylesheet({
         href,
         sectionHref,
         book,
-        mode,
         assetCache,
         dataUrlCache,
         cssCache,
-        zip,
-        assetPathByResolved,
-        usedAssetPaths,
       });
-      if (!rewritten) continue;
-      if (mode === "inline") {
-        const style = document.createElement("style");
-        style.textContent = rewritten.cssText;
-        link.replaceWith(style);
-        continue;
-      }
-      link.setAttribute("href", rewritten.assetPath);
+      if (!rewrittenCss) continue;
+      const style = document.createElement("style");
+      style.textContent = rewrittenCss;
+      link.replaceWith(style);
     }
 
     return container.innerHTML;
   }
 
-  private resolveAssetTarget(rawUrl: string, sectionHref: string, book: EpubBook) {
+  private resolveAssetTarget(rawUrl: string, sectionHref: string) {
     const trimmed = rawUrl.trim();
     if (!trimmed) {
       return { resolvedUrl: rawUrl, normalizedPath: "", isExternal: true };
     }
 
-    if (/^(data:|https?:|blob:)/i.test(trimmed)) {
+    if (/^(data:|https?:|blob:|#)/i.test(trimmed)) {
       return { resolvedUrl: trimmed, normalizedPath: "", isExternal: true };
     }
 
@@ -445,8 +404,7 @@ export class EpubConverter {
       : "";
     const normalized = new URL(trimmed, `https://x/${baseDir}`);
     const normalizedPath = normalized.pathname.replace(/^\/+/, "");
-    const resolvedUrl = book.resolve && !book.archived ? book.resolve(normalizedPath) : normalizedPath;
-    return { resolvedUrl, normalizedPath, isExternal: false };
+    return { resolvedUrl: normalizedPath, normalizedPath, isExternal: false };
   }
 
   private async getAsset(
@@ -462,11 +420,8 @@ export class EpubConverter {
 
   private async fetchAsset(resolved: { resolvedUrl: string; normalizedPath: string }, book: EpubBook) {
     try {
-      let fetchUrl = resolved.resolvedUrl;
-      if (book.archived && book.archive?.createUrl) {
-        const archivePath = resolved.normalizedPath || resolved.resolvedUrl;
-        fetchUrl = book.archive.createUrl(archivePath);
-      }
+      const epubPath = resolved.normalizedPath || resolved.resolvedUrl;
+      const fetchUrl = book.resolve?.(epubPath) ?? book.archive?.createUrl?.(epubPath) ?? epubPath;
       const response = await fetch(fetchUrl);
       if (!response.ok) {
         return null;
@@ -474,10 +429,8 @@ export class EpubConverter {
       const blob = await response.blob();
       const mimeType = blob.type || this.inferMimeType(resolved.normalizedPath) || "application/octet-stream";
       const typedBlob = blob.type ? blob : new Blob([blob], { type: mimeType });
-      const arrayBuffer = await typedBlob.arrayBuffer();
       return {
         blob: typedBlob,
-        arrayBuffer,
         mimeType,
         resolvedUrl: resolved.resolvedUrl,
         normalizedPath: resolved.normalizedPath,
@@ -507,67 +460,46 @@ export class EpubConverter {
     return map[ext];
   }
 
-  private toSafeAssetPath(path: string) {
-    const clean = path.split("?")[0].split("#")[0];
-    const segments = clean
-      .split("/")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment && segment !== "." && segment !== "..");
-    const safeSegments = segments.map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, "_"));
-    return safeSegments.join("/") || "asset";
-  }
-
-  private ensureUniqueAssetPath(path: string, used: Set<string>) {
-    if (!used.has(path)) {
-      used.add(path);
-      return path;
-    }
-    const extIndex = path.lastIndexOf(".");
-    const base = extIndex > 0 ? path.slice(0, extIndex) : path;
-    const ext = extIndex > 0 ? path.slice(extIndex) : "";
-    let counter = 2;
-    let candidate = `${base}-${counter}${ext}`;
-    while (used.has(candidate)) {
-      counter += 1;
-      candidate = `${base}-${counter}${ext}`;
-    }
-    used.add(candidate);
-    return candidate;
-  }
-
   private blobToDataUrl(blob: Blob) {
     return new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
+      reader.onerror = () => reject(reader.error ?? new Error("Failed to read blob"));
       reader.readAsDataURL(blob);
     });
+  }
+
+  private async resolveAssetToDataUrl(
+    resolved: { resolvedUrl: string; normalizedPath: string },
+    book: EpubBook,
+    assetCache: Map<string, Promise<AssetRecord | null>>
+  ) {
+    const asset = await this.getAsset(resolved, book, assetCache);
+    if (!asset) {
+      console.warn("Failed to load asset", resolved.resolvedUrl);
+      return resolved.resolvedUrl;
+    }
+    const mimeType = asset.blob.type || asset.mimeType || this.inferMimeType(asset.normalizedPath) || "application/octet-stream";
+    const blob = asset.blob.type ? asset.blob : new Blob([asset.blob], { type: mimeType });
+    return await this.blobToDataUrl(blob);
   }
 
   private async rewriteStylesheet({
     href,
     sectionHref,
     book,
-    mode,
     assetCache,
     dataUrlCache,
     cssCache,
-    zip,
-    assetPathByResolved,
-    usedAssetPaths,
   }: {
     href: string;
     sectionHref: string;
     book: EpubBook;
-    mode: HtmlExportMode;
     assetCache: Map<string, Promise<AssetRecord | null>>;
     dataUrlCache: Map<string, Promise<string>>;
-    cssCache: Map<string, Promise<{ cssText: string; assetPath: string } | null>>;
-    zip: JSZip | null;
-    assetPathByResolved: Map<string, string>;
-    usedAssetPaths: Set<string>;
+    cssCache: Map<string, Promise<string | null>>;
   }) {
-    const resolved = this.resolveAssetTarget(href, sectionHref, book);
+    const resolved = this.resolveAssetTarget(href, sectionHref);
     if (resolved.isExternal || !resolved.normalizedPath) {
       return null;
     }
@@ -579,27 +511,13 @@ export class EpubConverter {
           const asset = await this.getAsset(resolved, book, assetCache);
           if (!asset) return null;
           const cssText = await asset.blob.text();
-          const rewrittenCss = await this.rewriteCssUrls({
+          return await this.rewriteCssUrls({
             cssText,
             cssHref: resolved.normalizedPath,
             book,
-            mode,
             assetCache,
             dataUrlCache,
-            zip,
-            assetPathByResolved,
-            usedAssetPaths,
           });
-          let assetPath = assetPathByResolved.get(asset.resolvedUrl);
-          if (!assetPath) {
-            const safePath = this.toSafeAssetPath(asset.normalizedPath);
-            assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
-            assetPathByResolved.set(asset.resolvedUrl, assetPath);
-          }
-          if (mode === "zip" && zip) {
-            zip.file(`assets/${assetPath}`, rewrittenCss);
-          }
-          return { cssText: rewrittenCss, assetPath: `assets/${assetPath}` };
         })()
       );
     }
@@ -611,52 +529,26 @@ export class EpubConverter {
     cssText,
     cssHref,
     book,
-    mode,
     assetCache,
     dataUrlCache,
-    zip,
-    assetPathByResolved,
-    usedAssetPaths,
   }: {
     cssText: string;
     cssHref: string;
     book: EpubBook;
-    mode: HtmlExportMode;
     assetCache: Map<string, Promise<AssetRecord | null>>;
     dataUrlCache: Map<string, Promise<string>>;
-    zip: JSZip | null;
-    assetPathByResolved: Map<string, string>;
-    usedAssetPaths: Set<string>;
   }) {
     const rewriteUrl = async (rawUrl: string | null): Promise<string | null> => {
       if (!rawUrl) return null;
       const trimmed = rawUrl.trim();
       if (!trimmed || trimmed.startsWith("#")) return rawUrl;
-      const resolved = this.resolveAssetTarget(trimmed, cssHref, book);
+      const resolved = this.resolveAssetTarget(trimmed, cssHref);
       if (resolved.isExternal || !resolved.normalizedPath) return rawUrl;
 
-      const asset = await this.getAsset(resolved, book, assetCache);
-      if (!asset) {
-        console.warn("Failed to load asset", rawUrl);
-        return rawUrl;
+      if (!dataUrlCache.has(resolved.normalizedPath)) {
+        dataUrlCache.set(resolved.normalizedPath, this.resolveAssetToDataUrl(resolved, book, assetCache));
       }
-
-      if (mode === "inline") {
-        if (!dataUrlCache.has(asset.resolvedUrl)) {
-          dataUrlCache.set(asset.resolvedUrl, this.blobToDataUrl(asset.blob));
-        }
-        return await dataUrlCache.get(asset.resolvedUrl)!;
-      }
-
-      if (!zip) return rawUrl;
-      let assetPath = assetPathByResolved.get(asset.resolvedUrl);
-      if (!assetPath) {
-        const safePath = this.toSafeAssetPath(asset.normalizedPath);
-        assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
-        assetPathByResolved.set(asset.resolvedUrl, assetPath);
-        zip.file(`assets/${assetPath}`, asset.arrayBuffer, { binary: true });
-      }
-      return `assets/${assetPath}`;
+      return await dataUrlCache.get(resolved.normalizedPath)!;
     };
 
     const urlPattern = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
