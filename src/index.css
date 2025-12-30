@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222 28% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 28% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 28% 12%;
+  --primary: 221 83% 53%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 210 40% 96%;
+  --secondary-foreground: 222 28% 12%;
+  --muted: 210 40% 96%;
+  --muted-foreground: 215 20% 45%;
+  --accent: 214 95% 93%;
+  --accent-foreground: 222 28% 12%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214 32% 91%;
+  --input: 214 32% 91%;
+  --ring: 221 83% 53%;
+}
+
+.dark {
+  --background: 222 33% 8%;
+  --foreground: 210 40% 98%;
+  --card: 222 33% 10%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222 33% 10%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 217 91% 60%;
+  --primary-foreground: 222 33% 8%;
+  --secondary: 222 24% 18%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 222 24% 18%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 222 24% 18%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 62% 58%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 222 24% 20%;
+  --input: 222 24% 20%;
+  --ring: 217 91% 60%;
+}
+
+body {
+  @apply bg-background text-foreground font-sans antialiased;
+}
+
+* {
+  @apply border-border;
+}
+
+::selection {
+  background: hsl(var(--primary) / 0.2);
+}

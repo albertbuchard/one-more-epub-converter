@@ -1,14 +1,13 @@
 # one-more-epub-converter
 
 Client-side EPUB → TXT / printable HTML converter that runs entirely in the browser using epub.js.
-Designed for Cloudflare Workers static assets with an optional Docker Compose setup for local use.
+Designed for Cloudflare Workers static assets with a Vite + React front-end.
 
 ## Cloudflare Workers (static assets)
 
-This repo is fully static. Configure Workers to serve `public/` as static assets.
-There is no build step because assets are committed directly in `public/`.
+This repo is fully static. Build assets into `public/` and configure Workers to serve `public/`.
 
-- Build command: (leave empty)
+- Build command: `npm run build`
 - Assets directory: `public`
 
 A `wrangler.toml` is included with `[assets]` configured for `wrangler deploy` workflows.
@@ -19,7 +18,7 @@ A `wrangler.toml` is included with `[assets]` configured for `wrangler deploy` w
 2. Click **Create application** and choose **Workers**.
 3. Select **Import a repository** and pick this repo.
 4. In **Build settings**:
-   - **Build command**: _(leave empty)_
+   - **Build command**: `npm run build`
    - **Assets directory**: `public`
 5. Click **Save and Deploy**.
 6. After the first deploy finishes, open the provided `.workers.dev` URL to verify the site loads.
@@ -27,27 +26,28 @@ A `wrangler.toml` is included with `[assets]` configured for `wrangler deploy` w
 ### Wrangler commands
 
 ```bash
-# Local dev (serves static assets)
+# Local dev (serves built static assets)
+npm run build
 npx wrangler dev
 
 # Deploy to Workers
+npm run build
 npx wrangler deploy
 ```
 
 ## Local development
 
-### Option 1: Docker Compose
-
 ```bash
-docker compose up --build
+npm install
+npm run dev
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
+Then open [http://localhost:5173](http://localhost:5173).
 
-### Option 2: Python simple server
+## Build
 
 ```bash
-python -m http.server 8000
+npm run build
 ```
 
-Then open [http://localhost:8000](http://localhost:8000).
+Build output is written to `public/`, which is what Cloudflare Workers serves.
