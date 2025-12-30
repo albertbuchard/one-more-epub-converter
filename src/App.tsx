@@ -45,6 +45,7 @@ import {
 import { cn } from "./lib/utils";
 
 type ThemeMode = "system" | "light" | "dark";
+type HtmlExportMode = "zip" | "inline";
 
 type ConversionState = {
   stage: string;
@@ -188,6 +189,9 @@ function App() {
   const [outputTab, setOutputTab] = useState("preview");
   const [monospace, setMonospace] = useState(true);
   const [conversion, setConversion] = useState<ConversionState>(defaultConversion);
+  const [htmlExportMode, setHtmlExportMode] = useState<HtmlExportMode>("zip");
+  const [previewInIframe, setPreviewInIframe] = useState(true);
+  const [iframeSrc, setIframeSrc] = useState<string>("");
 
   useEffect(() => {
     const stored = window.localStorage.getItem("theme") as ThemeMode | null;
@@ -232,6 +236,7 @@ function App() {
     setLastHtml("");
     setLastTxt("");
     setOutputTab("preview");
+    setIframeSrc("");
     setConversion({ stage: "Cleared. Choose an .epub or .zip file.", progress: 0, running: false });
   }, []);
 
@@ -307,7 +312,8 @@ function App() {
     if (!book) return "";
     setConversion({ stage: "Converting to HTML…", progress: 60, running: true });
     try {
-      const html = await converterRef.current.toHtml(book);
+      const result = await converterRef.current.toHtmlWithAssets(book, { mode: "inline" });
+      const html = result.html;
       setLastHtml(html);
       setConversion({ stage: "HTML ready.", progress: 100, running: false });
       toast.success("HTML generated.");
@@ -322,11 +328,32 @@ function App() {
 
   const downloadHtml = useCallback(async () => {
     if (!book) return;
-    const html = lastHtml || (await buildHtml());
-    if (!html) return;
-    downloadRef.current.downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${baseName}.html`);
-    toast.success("HTML downloaded.");
-  }, [baseName, book, buildHtml, lastHtml]);
+    setConversion({ stage: "Preparing HTML export…", progress: 65, running: true });
+    try {
+      if (htmlExportMode === "inline") {
+        const html = lastHtml || (await buildHtml());
+        if (!html) return;
+        downloadRef.current.downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${baseName}.html`);
+        toast.success("Self-contained HTML downloaded.");
+        return;
+      }
+
+      const result = await converterRef.current.toHtmlWithAssets(book, { mode: "zip" });
+      downloadRef.current.downloadBlob(
+        result.zipBlob,
+        `${baseName}-html.zip`
+      );
+      if (result.htmlPreview) {
+        setLastHtml(result.htmlPreview);
+      }
+      toast.success("HTML project ZIP downloaded.");
+    } catch (error) {
+      console.error(error);
+      toast.error("HTML export failed.");
+    } finally {
+      setConversion({ stage: "Done.", progress: 100, running: false });
+    }
+  }, [baseName, book, buildHtml, htmlExportMode, lastHtml]);
 
   const openPrintable = useCallback(async () => {
     if (!book) return;
@@ -374,6 +401,26 @@ function App() {
     if (!lastTxt) return "";
     return lastTxt.length > 200000 ? `${lastTxt.slice(0, 200000)}\n\n…(truncated for preview)` : lastTxt;
   }, [lastTxt]);
+
+  useEffect(() => {
+    if (!previewInIframe || !lastHtml) {
+      setIframeSrc((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return "";
+      });
+      return;
+    }
+
+    const blob = new Blob([lastHtml], { type: "text/html;charset=utf-8" });
+    const nextSrc = URL.createObjectURL(blob);
+    setIframeSrc((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return nextSrc;
+    });
+    return () => {
+      URL.revokeObjectURL(nextSrc);
+    };
+  }, [lastHtml, previewInIframe]);
 
   const copyDisabled = outputTab === "html" ? !lastHtml : !lastTxt;
 
@@ -521,6 +568,57 @@ function App() {
 
           <Card>
             <CardHeader>
+              <CardTitle className="text-lg">HTML export options</CardTitle>
+              <CardDescription>
+                Choose between a project ZIP (index.html + assets) or a self-contained HTML file.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  variant={htmlExportMode === "zip" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setHtmlExportMode("zip")}
+                  disabled={!book}
+                >
+                  ZIP project (recommended)
+                </Button>
+                <Button
+                  variant={htmlExportMode === "inline" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setHtmlExportMode("inline")}
+                  disabled={!book}
+                >
+                  Self-contained HTML
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">Preview:</span>
+                <Button
+                  variant={previewInIframe ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setPreviewInIframe(true)}
+                  disabled={!book}
+                >
+                  Iframe
+                </Button>
+                <Button
+                  variant={!previewInIframe ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setPreviewInIframe(false)}
+                  disabled={!book}
+                >
+                  Raw HTML
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Iframe preview always uses the self-contained HTML for reliable asset loading.
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle className="text-lg">Output Preview</CardTitle>
               <CardDescription>Inspect the generated text or HTML before downloading.</CardDescription>
             </CardHeader>
@@ -553,11 +651,26 @@ function App() {
                   />
                 </TabsContent>
                 <TabsContent value="html">
-                  <Textarea
-                    readOnly
-                    value={lastHtml || "Generate HTML to preview it here."}
-                    className="min-h-[220px] resize-y font-mono"
-                  />
+                  {previewInIframe ? (
+                    <div className="min-h-[220px] overflow-hidden rounded-lg border">
+                      {iframeSrc ? (
+                        <iframe
+                          title="HTML preview"
+                          src={iframeSrc}
+                          className="min-h-[420px] w-full"
+                          sandbox="allow-same-origin"
+                        />
+                      ) : (
+                        <div className="p-4 text-sm text-muted-foreground">Generate HTML to preview it here.</div>
+                      )}
+                    </div>
+                  ) : (
+                    <Textarea
+                      readOnly
+                      value={lastHtml || "Generate HTML to preview it here."}
+                      className="min-h-[220px] resize-y font-mono"
+                    />
+                  )}
                 </TabsContent>
               </Tabs>
             </CardContent>
