@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDropzone } from "react-dropzone";
+import {FileRejection, useDropzone} from "react-dropzone";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -155,7 +155,7 @@ function App() {
   }, []);
 
   const onDrop = useCallback(
-    (acceptedFiles: File[]) => {
+    (acceptedFiles: File[], fileRejections: FileRejection[]) => {
       const nextFile = acceptedFiles[0];
       if (nextFile) {
         void handleFile(nextFile);
@@ -166,7 +166,7 @@ function App() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { "application/epub+zip": [".epub"] },
+    accept: { "application/epub+zip": [".epub", ".epub.zip"] },
     multiple: false,
   });
 

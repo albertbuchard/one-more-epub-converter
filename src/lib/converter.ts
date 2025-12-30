@@ -13,8 +13,24 @@ type EpubBook = ReturnType<typeof ePub> & {
   };
   package?: { metadata?: { title?: string } };
   load?: (...args: unknown[]) => unknown;
-  ready: Promise<void>;
+
+  // important:
+  opened?: Promise<unknown>;
+  loaded?: {
+    spine?: Promise<unknown>;
+    manifest?: Promise<unknown>;
+    metadata?: Promise<unknown>;
+  };
+
+  ready?: Promise<void>;
 };
+
+
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string) =>
+    Promise.race([
+      p,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Timeout waiting for ${label}`)), ms)),
+    ]);
 
 export class EpubRuntime {
   private ready = false;
@@ -30,6 +46,7 @@ export class EpubRuntime {
     return ePub(arrayBuffer) as EpubBook;
   }
 }
+
 
 export class HtmlSanitizer {
   sanitize(html: string) {
@@ -147,8 +164,19 @@ export class EpubConverter {
   constructor(private runtime: EpubRuntime, private sanitizer: HtmlSanitizer) {}
 
   async loadBook(arrayBuffer: ArrayBuffer) {
-    const book = this.runtime.openBook(arrayBuffer);
-    await book.ready;
+    const book = this.runtime.openBook(arrayBuffer) as EpubBook;
+
+    // Prefer opened; it's much less likely to hang than ready
+    const opened = book.opened ?? book.ready ?? Promise.resolve();
+
+    // 60s is arbitrary; pick what you want
+    await withTimeout(Promise.resolve(opened), 60_000, "book.opened");
+
+    // If available, wait for spine specifically (what you actually need for conversion)
+    if (book.loaded?.spine) {
+      await withTimeout(Promise.resolve(book.loaded.spine), 60_000, "book.loaded.spine");
+    }
+
     return book;
   }
 
