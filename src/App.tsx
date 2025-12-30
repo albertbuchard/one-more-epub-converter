@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {FileRejection, useDropzone} from "react-dropzone";
+import { FileRejection, useDropzone } from "react-dropzone";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -13,6 +13,7 @@ import {
   Upload,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
+import JSZip from "jszip";
 
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -52,7 +53,7 @@ type ConversionState = {
 };
 
 const defaultConversion: ConversionState = {
-  stage: "Ready. Choose an .epub file.",
+  stage: "Ready. Choose an .epub or .zip file.",
   progress: 0,
   running: false,
 };
@@ -72,6 +73,105 @@ const applyTheme = (mode: ThemeMode) => {
   const target = mode === "system" ? systemTheme() : mode;
   root.classList.toggle("dark", target === "dark");
 };
+
+const CONTAINER_RE = /(^|\/)meta-inf\/container\.xml$/i;
+const MIMETYPE_RE = /(^|\/)mimetype$/i;
+
+const pickBestEpubEntry = (entries: string[]) => {
+  if (entries.length === 1) return entries[0];
+  return [...entries].sort((a, b) => {
+    const depthA = a.split("/").length;
+    const depthB = b.split("/").length;
+    if (depthA !== depthB) return depthA - depthB;
+    return a.length - b.length;
+  })[0];
+};
+
+async function ensureRootedEpubZip(buf: ArrayBuffer): Promise<ArrayBuffer> {
+  const zip = await JSZip.loadAsync(buf);
+
+  const names = Object.values(zip.files)
+    .filter((f) => !f.dir)
+    .map((f) => f.name);
+
+  const containerPath = names.find((n) => CONTAINER_RE.test(n));
+  if (!containerPath) {
+    const sample = names.slice(0, 30).join(", ");
+    throw new Error(
+      `ZIP does not contain META-INF/container.xml (case-insensitive). First entries: ${sample}`
+    );
+  }
+
+  if (containerPath === "META-INF/container.xml") {
+    return buf;
+  }
+
+  const idx = containerPath.toLowerCase().lastIndexOf("meta-inf/container.xml");
+  const prefix = containerPath.slice(0, idx);
+
+  const out = new JSZip();
+
+  const mimetypePath = names.find((n) => MIMETYPE_RE.test(n) && n.startsWith(prefix));
+  if (mimetypePath) {
+    const mimetype = await zip.file(mimetypePath)!.async("string");
+    out.file("mimetype", mimetype, { compression: "STORE" });
+  } else {
+    out.file("mimetype", "application/epub+zip", { compression: "STORE" });
+  }
+
+  const underPrefix = names.filter((n) => n.startsWith(prefix) && n !== mimetypePath);
+  for (const name of underPrefix) {
+    const entry = zip.file(name);
+    if (!entry) continue;
+
+    let newName = name.slice(prefix.length);
+    if (newName.startsWith("/")) newName = newName.slice(1);
+
+    if (CONTAINER_RE.test(newName)) {
+      newName = "META-INF/container.xml";
+    }
+
+    const content = await entry.async("arraybuffer");
+    out.file(newName, content, { compression: "DEFLATE" });
+  }
+
+  return await out.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+}
+
+async function normalizeToEpubArrayBuffer(
+  file: File
+): Promise<{ buf: ArrayBuffer; displayName: string }> {
+  const lower = file.name.toLowerCase();
+  const raw = await file.arrayBuffer();
+
+  if (lower.endsWith(".zip")) {
+    const zip = await JSZip.loadAsync(raw);
+
+    const entries = Object.values(zip.files)
+      .filter((f) => !f.dir)
+      .map((f) => f.name);
+
+    const epubEntries = entries.filter((n) => n.toLowerCase().endsWith(".epub"));
+    if (epubEntries.length >= 1) {
+      const best = pickBestEpubEntry(epubEntries);
+      const entry = zip.file(best);
+      if (!entry) throw new Error(`Could not read ${best} from ZIP.`);
+      const inner = await entry.async("arraybuffer");
+      const fixed = await ensureRootedEpubZip(inner);
+      return { buf: fixed, displayName: best.split("/").pop() || best };
+    }
+
+    const fixed = await ensureRootedEpubZip(raw);
+    return { buf: fixed, displayName: file.name.replace(/\.zip$/i, ".epub") };
+  }
+
+  if (lower.endsWith(".epub")) {
+    const fixed = await ensureRootedEpubZip(raw);
+    return { buf: fixed, displayName: file.name };
+  }
+
+  throw new Error("Unsupported file type. Please provide an .epub or a .zip containing an .epub.");
+}
 
 function App() {
   const runtimeRef = useRef(new EpubRuntime());
@@ -111,7 +211,7 @@ function App() {
       setConversion({ stage: "Loading EPUB runtime…", progress: 12, running: true });
       try {
         await runtimeRef.current.init();
-        setConversion({ stage: "Ready. Choose an .epub file.", progress: 100, running: false });
+        setConversion({ stage: "Ready. Choose an .epub or .zip file.", progress: 100, running: false });
       } catch (error) {
         console.error(error);
         setConversion({
@@ -132,20 +232,25 @@ function App() {
     setLastHtml("");
     setLastTxt("");
     setOutputTab("preview");
-    setConversion({ stage: "Cleared. Choose an .epub file.", progress: 0, running: false });
+    setConversion({ stage: "Cleared. Choose an .epub or .zip file.", progress: 0, running: false });
   }, []);
 
   const handleFile = useCallback(async (nextFile: File) => {
-    setFile(nextFile);
     setLastHtml("");
     setLastTxt("");
     setOutputTab("preview");
     setConversion({ stage: `Reading ${nextFile.name}…`, progress: 25, running: true });
     try {
-      const buf = await nextFile.arrayBuffer();
+      const { buf, displayName } = await normalizeToEpubArrayBuffer(nextFile);
+      const displayFile = new File([buf], displayName, { type: "application/epub+zip" });
+      setFile(displayFile);
       const loadedBook = await converterRef.current.loadBook(buf);
       setBook(loadedBook);
-      setConversion({ stage: `Loaded ${nextFile.name}. Choose TXT or Printable.`, progress: 100, running: false });
+      setConversion({
+        stage: `Loaded ${displayName}. Choose TXT or Printable.`,
+        progress: 100,
+        running: false,
+      });
       toast.success("EPUB loaded successfully.");
     } catch (error) {
       console.error(error);
@@ -166,7 +271,10 @@ function App() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { "application/epub+zip": [".epub", ".epub.zip"] },
+    accept: {
+      "application/epub+zip": [".epub", ".epub.zip"],
+      "application/zip": [".zip"],
+    },
     multiple: false,
   });
 
@@ -308,7 +416,7 @@ function App() {
                 Upload your EPUB
               </CardTitle>
               <CardDescription>
-                Drag and drop your .epub file or click to browse. The file never leaves your device.
+                Drag and drop your .epub or .zip file or click to browse. The file never leaves your device.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -327,7 +435,7 @@ function App() {
                   <p className="mt-4 text-sm font-medium">
                     {isDragActive ? "Drop the file to start" : "Drop EPUB here or click to upload"}
                   </p>
-                  <p className="mt-1 text-xs text-muted-foreground">Supports .epub files only.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Supports .epub and .zip files.</p>
                 </div>
               </div>
 
