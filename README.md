@@ -51,3 +51,10 @@ npm run build
 ```
 
 Build output is written to `public/`, which is what Cloudflare Workers serves.
+
+## Manual testing (EPUB images)
+
+1. Run the app locally (`npm run dev`) and open [http://localhost:5173](http://localhost:5173).
+2. Upload an EPUB that contains multiple chapters and image assets.
+3. Download **Single HTML file** and open the saved `.html` offline — images should render.
+4. Download **ZIP (index.html only)**, unzip it, open `index.html` offline — images should render.
