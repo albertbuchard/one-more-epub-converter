@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Download,
+  FileDown,
   FileText,
   Loader2,
   Moon,
@@ -40,6 +41,7 @@ import {
   EpubRuntime,
   FileNameService,
   HtmlSanitizer,
+  PdfService,
   PrintService,
 } from "./lib/converter";
 import { cn } from "./lib/utils";
@@ -179,6 +181,7 @@ function App() {
   const sanitizerRef = useRef(new HtmlSanitizer());
   const converterRef = useRef(new EpubConverter(runtimeRef.current, sanitizerRef.current));
   const downloadRef = useRef(new DownloadService());
+  const pdfRef = useRef(new PdfService());
   const printRef = useRef(new PrintService());
 
   const [theme, setTheme] = useState<ThemeMode>("system");
@@ -252,7 +255,7 @@ function App() {
       const loadedBook = await converterRef.current.loadBook(buf);
       setBook(loadedBook);
       setConversion({
-        stage: `Loaded ${displayName}. Choose TXT or Printable.`,
+        stage: `Loaded ${displayName}. Choose TXT, HTML, or PDF.`,
         progress: 100,
         running: false,
       });
@@ -376,6 +379,24 @@ function App() {
     }
   }, [baseName, book, buildHtml, lastHtml]);
 
+  const downloadPdf = useCallback(async () => {
+    if (!book) return;
+    setConversion({ stage: "Building printable PDF…", progress: 72, running: true });
+    const html = lastHtml || (await buildHtml());
+    if (!html) return;
+    try {
+      setConversion({ stage: "Rendering PDF…", progress: 90, running: true });
+      const blob = await pdfRef.current.htmlToPdfBlob(html, baseName);
+      downloadRef.current.downloadBlob(blob, `${baseName}.pdf`);
+      setConversion({ stage: "Done.", progress: 100, running: false });
+      toast.success("PDF generated and downloaded.");
+    } catch (error) {
+      console.error(error);
+      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      toast.error("PDF generation failed.");
+    }
+  }, [baseName, book, buildHtml, lastHtml]);
+
   const downloadTxt = useCallback(() => {
     if (!lastTxt) return;
     downloadRef.current.downloadBlob(
@@ -431,7 +452,7 @@ function App() {
         <header className="container flex flex-wrap items-center justify-between gap-4 py-6">
           <div>
             <p className="text-sm uppercase tracking-[0.2em] text-muted-foreground">One More EPUB</p>
-            <h1 className="text-3xl font-semibold leading-tight md:text-4xl">EPUB to TXT + Printable HTML</h1>
+            <h1 className="text-3xl font-semibold leading-tight md:text-4xl">EPUB to TXT + Printable HTML + PDF</h1>
             <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
               Private, offline-ready conversion in your browser. No uploads. No servers. Just clean output.
             </p>
@@ -543,7 +564,11 @@ function App() {
                   </Button>
                   <Button variant="outline" onClick={openPrintable} disabled={!canRun}>
                     <Printer className="h-4 w-4" />
-                    Printable / PDF
+                    Printable view
+                  </Button>
+                  <Button variant="outline" onClick={downloadPdf} disabled={!canRun}>
+                    <FileDown className="h-4 w-4" />
+                    Download PDF
                   </Button>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -560,7 +585,7 @@ function App() {
                   </Button>
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
-                  Tip: Use Printable → Save as PDF for a clean copy. Large books may take a minute.
+                  Tip: Download PDF or use Printable → Save as PDF for a clean copy. Large books may take a minute.
                 </p>
               </div>
             </CardContent>

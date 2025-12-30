@@ -1,6 +1,7 @@
 import DOMPurify from "dompurify";
 import ePub from "epubjs";
 import JSZip from "jszip";
+import html2pdf from "html2pdf.js";
 
 type EpubBook = ReturnType<typeof ePub> & {
   spine: {
@@ -712,6 +713,52 @@ export class PrintService {
     popup.document.close();
     popup.document.title = title || "EPUB";
     setTimeout(() => popup.print(), 250);
+  }
+}
+
+export class PdfService {
+  async htmlToPdfBlob(html: string, title: string) {
+    const container = this.createContainer(html);
+    document.body.appendChild(container);
+    try {
+      return await html2pdf()
+        .from(container)
+        .set({
+          margin: [18, 18, 18, 18],
+          filename: `${title || "book"}.pdf`,
+          image: { type: "jpeg", quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: "pt", format: "a4", orientation: "portrait" },
+          pagebreak: { mode: ["css", "legacy"] },
+        })
+        .outputPdf("blob");
+    } finally {
+      container.remove();
+    }
+  }
+
+  private createContainer(html: string) {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const container = document.createElement("div");
+    container.style.position = "fixed";
+    container.style.left = "-10000px";
+    container.style.top = "0";
+    container.style.width = "794px";
+    container.style.background = "#fff";
+
+    const styleText = Array.from(parsed.querySelectorAll("style"))
+      .map((style) => style.textContent || "")
+      .join("\n");
+    if (styleText.trim()) {
+      const style = document.createElement("style");
+      style.textContent = styleText;
+      container.appendChild(style);
+    }
+
+    const content = document.createElement("div");
+    content.innerHTML = parsed.body?.innerHTML || html;
+    container.appendChild(content);
+    return container;
   }
 }
 
