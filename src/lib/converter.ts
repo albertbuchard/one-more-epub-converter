@@ -181,17 +181,23 @@ export class EpubConverter {
   }
 
   private async *iterateSpine(book: EpubBook) {
-    for (const item of book.spine.spineItems) {
-      const section = await item.load(book.load?.bind(book));
+    const request = book.load?.bind(book);
+    if (!request) throw new Error("book.load is missing");
+
+    for (const section of book.spine?.spineItems ?? []) {
       try {
-        if (section?.document?.body) {
-          yield section.document.body.innerHTML;
-        } else if (section?.contents) {
-          yield section.contents;
-        } else {
-          yield "";
-        }
+        // epub.js: section.load(request) populates section.document / section.contents
+        const contents = await section.load(request);
+
+        // Prefer the parsed document if present, otherwise fallback to returned string
+        const html =
+            section?.document?.body?.innerHTML ??
+            section?.contents ??
+            (typeof contents === "string" ? contents : "");
+
+        yield html || "";
       } finally {
+        // Important for big books: frees memory
         section?.unload?.();
       }
     }
