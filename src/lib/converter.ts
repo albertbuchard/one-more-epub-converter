@@ -115,6 +115,7 @@ type HtmlExportMode = "zip" | "inline";
 
 type AssetRecord = {
   blob: Blob;
+  arrayBuffer: ArrayBuffer;
   mimeType: string;
   resolvedUrl: string;
   normalizedPath: string;
@@ -256,6 +257,7 @@ export class EpubConverter {
     const sections: string[] = [];
     const assetCache = new Map<string, Promise<AssetRecord | null>>();
     const dataUrlCache = new Map<string, Promise<string>>();
+    const cssCache = new Map<string, Promise<{ cssText: string; assetPath: string } | null>>();
     const zip = options.mode === "zip" ? new JSZip() : null;
     const assetPathByResolved = new Map<string, string>();
     const usedAssetPaths = new Set<string>();
@@ -269,6 +271,7 @@ export class EpubConverter {
         mode: options.mode,
         assetCache,
         dataUrlCache,
+        cssCache,
         zip,
         assetPathByResolved,
         usedAssetPaths,
@@ -303,6 +306,7 @@ export class EpubConverter {
     mode,
     assetCache,
     dataUrlCache,
+    cssCache,
     zip,
     assetPathByResolved,
     usedAssetPaths,
@@ -313,6 +317,7 @@ export class EpubConverter {
     mode: HtmlExportMode;
     assetCache: Map<string, Promise<AssetRecord | null>>;
     dataUrlCache: Map<string, Promise<string>>;
+    cssCache: Map<string, Promise<{ cssText: string; assetPath: string } | null>>;
     zip: JSZip | null;
     assetPathByResolved: Map<string, string>;
     usedAssetPaths: Set<string>;
@@ -344,7 +349,7 @@ export class EpubConverter {
         const safePath = this.toSafeAssetPath(asset.normalizedPath);
         assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
         assetPathByResolved.set(asset.resolvedUrl, assetPath);
-        zip.file(`assets/${assetPath}`, asset.blob);
+        zip.file(`assets/${assetPath}`, asset.arrayBuffer, { binary: true });
       }
       return `assets/${assetPath}`;
     };
@@ -396,8 +401,28 @@ export class EpubConverter {
     for (const link of linkElements) {
       const rel = (link.getAttribute("rel") || "").toLowerCase();
       if (!rel.includes("stylesheet")) continue;
-      const rewritten = await rewriteUrl(link.getAttribute("href"));
-      if (rewritten) link.setAttribute("href", rewritten);
+      const href = link.getAttribute("href");
+      if (!href) continue;
+      const rewritten = await this.rewriteStylesheet({
+        href,
+        sectionHref,
+        book,
+        mode,
+        assetCache,
+        dataUrlCache,
+        cssCache,
+        zip,
+        assetPathByResolved,
+        usedAssetPaths,
+      });
+      if (!rewritten) continue;
+      if (mode === "inline") {
+        const style = document.createElement("style");
+        style.textContent = rewritten.cssText;
+        link.replaceWith(style);
+        continue;
+      }
+      link.setAttribute("href", rewritten.assetPath);
     }
 
     return container.innerHTML;
@@ -419,7 +444,7 @@ export class EpubConverter {
       : "";
     const normalized = new URL(trimmed, `https://x/${baseDir}`);
     const normalizedPath = normalized.pathname.replace(/^\/+/, "");
-    const resolvedUrl = book.resolve ? book.resolve(normalizedPath) : normalizedPath;
+    const resolvedUrl = book.resolve && !book.archived ? book.resolve(normalizedPath) : normalizedPath;
     return { resolvedUrl, normalizedPath, isExternal: false };
   }
 
@@ -438,7 +463,8 @@ export class EpubConverter {
     try {
       let fetchUrl = resolved.resolvedUrl;
       if (book.archived && book.archive?.createUrl) {
-        fetchUrl = book.archive.createUrl(resolved.resolvedUrl);
+        const archivePath = resolved.normalizedPath || resolved.resolvedUrl;
+        fetchUrl = book.archive.createUrl(archivePath);
       }
       const response = await fetch(fetchUrl);
       if (!response.ok) {
@@ -447,8 +473,10 @@ export class EpubConverter {
       const blob = await response.blob();
       const mimeType = blob.type || this.inferMimeType(resolved.normalizedPath) || "application/octet-stream";
       const typedBlob = blob.type ? blob : new Blob([blob], { type: mimeType });
+      const arrayBuffer = await typedBlob.arrayBuffer();
       return {
         blob: typedBlob,
+        arrayBuffer,
         mimeType,
         resolvedUrl: resolved.resolvedUrl,
         normalizedPath: resolved.normalizedPath,
@@ -513,6 +541,151 @@ export class EpubConverter {
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(blob);
     });
+  }
+
+  private async rewriteStylesheet({
+    href,
+    sectionHref,
+    book,
+    mode,
+    assetCache,
+    dataUrlCache,
+    cssCache,
+    zip,
+    assetPathByResolved,
+    usedAssetPaths,
+  }: {
+    href: string;
+    sectionHref: string;
+    book: EpubBook;
+    mode: HtmlExportMode;
+    assetCache: Map<string, Promise<AssetRecord | null>>;
+    dataUrlCache: Map<string, Promise<string>>;
+    cssCache: Map<string, Promise<{ cssText: string; assetPath: string } | null>>;
+    zip: JSZip | null;
+    assetPathByResolved: Map<string, string>;
+    usedAssetPaths: Set<string>;
+  }) {
+    const resolved = this.resolveAssetTarget(href, sectionHref, book);
+    if (resolved.isExternal || !resolved.normalizedPath) {
+      return null;
+    }
+
+    if (!cssCache.has(resolved.resolvedUrl)) {
+      cssCache.set(
+        resolved.resolvedUrl,
+        (async () => {
+          const asset = await this.getAsset(resolved, book, assetCache);
+          if (!asset) return null;
+          const cssText = await asset.blob.text();
+          const rewrittenCss = await this.rewriteCssUrls({
+            cssText,
+            cssHref: resolved.normalizedPath,
+            book,
+            mode,
+            assetCache,
+            dataUrlCache,
+            zip,
+            assetPathByResolved,
+            usedAssetPaths,
+          });
+          let assetPath = assetPathByResolved.get(asset.resolvedUrl);
+          if (!assetPath) {
+            const safePath = this.toSafeAssetPath(asset.normalizedPath);
+            assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
+            assetPathByResolved.set(asset.resolvedUrl, assetPath);
+          }
+          if (mode === "zip" && zip) {
+            zip.file(`assets/${assetPath}`, rewrittenCss);
+          }
+          return { cssText: rewrittenCss, assetPath: `assets/${assetPath}` };
+        })()
+      );
+    }
+
+    return await cssCache.get(resolved.resolvedUrl)!;
+  }
+
+  private async rewriteCssUrls({
+    cssText,
+    cssHref,
+    book,
+    mode,
+    assetCache,
+    dataUrlCache,
+    zip,
+    assetPathByResolved,
+    usedAssetPaths,
+  }: {
+    cssText: string;
+    cssHref: string;
+    book: EpubBook;
+    mode: HtmlExportMode;
+    assetCache: Map<string, Promise<AssetRecord | null>>;
+    dataUrlCache: Map<string, Promise<string>>;
+    zip: JSZip | null;
+    assetPathByResolved: Map<string, string>;
+    usedAssetPaths: Set<string>;
+  }) {
+    const rewriteUrl = async (rawUrl: string | null): Promise<string | null> => {
+      if (!rawUrl) return null;
+      const trimmed = rawUrl.trim();
+      if (!trimmed || trimmed.startsWith("#")) return rawUrl;
+      const resolved = this.resolveAssetTarget(trimmed, cssHref, book);
+      if (resolved.isExternal || !resolved.normalizedPath) return rawUrl;
+
+      const asset = await this.getAsset(resolved, book, assetCache);
+      if (!asset) {
+        console.warn("Failed to load asset", rawUrl);
+        return rawUrl;
+      }
+
+      if (mode === "inline") {
+        if (!dataUrlCache.has(asset.resolvedUrl)) {
+          dataUrlCache.set(asset.resolvedUrl, this.blobToDataUrl(asset.blob));
+        }
+        return await dataUrlCache.get(asset.resolvedUrl)!;
+      }
+
+      if (!zip) return rawUrl;
+      let assetPath = assetPathByResolved.get(asset.resolvedUrl);
+      if (!assetPath) {
+        const safePath = this.toSafeAssetPath(asset.normalizedPath);
+        assetPath = this.ensureUniqueAssetPath(safePath, usedAssetPaths);
+        assetPathByResolved.set(asset.resolvedUrl, assetPath);
+        zip.file(`assets/${assetPath}`, asset.arrayBuffer, { binary: true });
+      }
+      return `assets/${assetPath}`;
+    };
+
+    const urlPattern = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+    const importPattern = /@import\s+(?:url\()?['"]?([^'")]+)['"]?\)?/gi;
+
+    let rewritten = "";
+    let lastIndex = 0;
+    for (const match of cssText.matchAll(urlPattern)) {
+      const [full, quote, url] = match;
+      if (match.index === undefined) continue;
+      rewritten += cssText.slice(lastIndex, match.index);
+      const nextUrl = (await rewriteUrl(url)) || url;
+      rewritten += `url(${quote}${nextUrl}${quote})`;
+      lastIndex = match.index + full.length;
+    }
+    rewritten += cssText.slice(lastIndex);
+
+    let importRewritten = "";
+    lastIndex = 0;
+    for (const match of rewritten.matchAll(importPattern)) {
+      const [full, url] = match;
+      if (match.index === undefined) continue;
+      importRewritten += rewritten.slice(lastIndex, match.index);
+      const nextUrl = (await rewriteUrl(url)) || url;
+      importRewritten += full.replace(url, nextUrl);
+      lastIndex = match.index + full.length;
+    }
+    importRewritten += rewritten.slice(lastIndex);
+
+    return importRewritten;
   }
 }
 
