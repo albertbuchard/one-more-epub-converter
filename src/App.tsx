@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { FileRejection, useDropzone } from "react-dropzone";
 import {
   AlertTriangle,
@@ -44,22 +44,11 @@ import {
   PdfService,
   PrintService,
 } from "./lib/converter";
+import { createProgressStore, createRafThrottledPublisher, ProgressPublishInput } from "./lib/progress";
 import { cn } from "./lib/utils";
 
 type ThemeMode = "system" | "light" | "dark";
 type HtmlExportMode = "zip" | "inline";
-
-type ConversionState = {
-  stage: string;
-  progress: number;
-  running: boolean;
-};
-
-const defaultConversion: ConversionState = {
-  stage: "Ready. Choose an .epub or .zip file.",
-  progress: 0,
-  running: false,
-};
 
 const formatFileSize = (bytes: number) => {
   if (!bytes) return "0 B";
@@ -183,6 +172,27 @@ function App() {
   const downloadRef = useRef(new DownloadService());
   const pdfRef = useRef(new PdfService());
   const printRef = useRef(new PrintService());
+  const progressStoreRef = useRef(
+    createProgressStore({
+      seq: 0,
+      running: false,
+      phase: "idle",
+      percent: 0,
+      stage: "Ready. Choose an .epub or .zip file.",
+      timestampMs: Date.now(),
+    })
+  );
+  const progressPublisherRef = useRef(createRafThrottledPublisher(progressStoreRef.current));
+
+  const publishProgress = useCallback((update: ProgressPublishInput) => {
+    progressPublisherRef.current(update);
+  }, []);
+
+  const progressSnapshot = useSyncExternalStore(
+    progressStoreRef.current.subscribe,
+    progressStoreRef.current.getSnapshot,
+    progressStoreRef.current.getSnapshot
+  );
 
   const [theme, setTheme] = useState<ThemeMode>("system");
   const [file, setFile] = useState<File | null>(null);
@@ -191,7 +201,6 @@ function App() {
   const [lastTxt, setLastTxt] = useState<string>("");
   const [outputTab, setOutputTab] = useState("preview");
   const [monospace, setMonospace] = useState(true);
-  const [conversion, setConversion] = useState<ConversionState>(defaultConversion);
   const [htmlExportMode, setHtmlExportMode] = useState<HtmlExportMode>("inline");
   const [previewInIframe, setPreviewInIframe] = useState(true);
   const [iframeSrc, setIframeSrc] = useState<string>("");
@@ -215,23 +224,29 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
-      setConversion({ stage: "Loading EPUB runtime…", progress: 12, running: true });
+      publishProgress({ stage: "Loading EPUB runtime…", percent: 12, running: true, phase: "prepare" });
       try {
         await runtimeRef.current.init();
-        setConversion({ stage: "Ready. Choose an .epub or .zip file.", progress: 100, running: false });
+        publishProgress({
+          stage: "Ready. Choose an .epub or .zip file.",
+          percent: 100,
+          running: false,
+          phase: "done",
+        });
       } catch (error) {
         console.error(error);
-        setConversion({
+        publishProgress({
           stage: `Failed to load runtime: ${(error as Error)?.message || error}`,
-          progress: 0,
+          percent: 0,
           running: false,
+          phase: "error",
         });
         toast.error("Failed to load EPUB runtime.");
       }
     };
 
     init();
-  }, []);
+  }, [publishProgress]);
 
   const resetState = useCallback(() => {
     setFile(null);
@@ -240,32 +255,48 @@ function App() {
     setLastTxt("");
     setOutputTab("preview");
     setIframeSrc("");
-    setConversion({ stage: "Cleared. Choose an .epub or .zip file.", progress: 0, running: false });
-  }, []);
+    publishProgress({
+      stage: "Cleared. Choose an .epub or .zip file.",
+      percent: 0,
+      running: false,
+      phase: "idle",
+    });
+  }, [publishProgress]);
 
   const handleFile = useCallback(async (nextFile: File) => {
     setLastHtml("");
     setLastTxt("");
     setOutputTab("preview");
-    setConversion({ stage: `Reading ${nextFile.name}…`, progress: 25, running: true });
+    publishProgress({
+      stage: `Reading ${nextFile.name}…`,
+      percent: 25,
+      running: true,
+      phase: "prepare",
+    });
     try {
       const { buf, displayName } = await normalizeToEpubArrayBuffer(nextFile);
       const displayFile = new File([buf], displayName, { type: "application/epub+zip" });
       setFile(displayFile);
       const loadedBook = await converterRef.current.loadBook(buf);
       setBook(loadedBook);
-      setConversion({
+      publishProgress({
         stage: `Loaded ${displayName}. Choose TXT, HTML, or PDF.`,
-        progress: 100,
+        percent: 100,
         running: false,
+        phase: "done",
       });
       toast.success("EPUB loaded successfully.");
     } catch (error) {
       console.error(error);
-      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
       toast.error("Failed to load the EPUB file.");
     }
-  }, []);
+  }, [publishProgress]);
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]) => {
@@ -286,52 +317,62 @@ function App() {
     multiple: false,
   });
 
-  const canRun = Boolean(book) && !conversion.running;
+  const canRun = Boolean(book) && !progressSnapshot.running;
 
   const baseName = useMemo(() => FileNameService.baseName(file), [file]);
 
   const convertTxt = useCallback(async () => {
     if (!book) return;
-    setConversion({ stage: "Converting to TXT…", progress: 55, running: true });
+    publishProgress({ stage: "Converting to TXT…", percent: 55, running: true, phase: "prepare" });
     try {
       const text = await converterRef.current.toTxt(book);
       setLastTxt(text);
       setOutputTab("preview");
-      setConversion({ stage: "TXT ready. Downloading…", progress: 90, running: true });
+      publishProgress({ stage: "TXT ready. Downloading…", percent: 90, running: true, phase: "finalize" });
       downloadRef.current.downloadBlob(
         new Blob([text], { type: "text/plain;charset=utf-8" }),
         `${baseName}.txt`
       );
-      setConversion({ stage: "Done.", progress: 100, running: false });
+      publishProgress({ stage: "Done.", percent: 100, running: false, phase: "done" });
       toast.success("TXT generated and downloaded.");
     } catch (error) {
       console.error(error);
-      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
       toast.error("TXT conversion failed.");
     }
-  }, [baseName, book]);
+  }, [baseName, book, publishProgress]);
 
   const buildHtml = useCallback(async () => {
     if (!book) return "";
-    setConversion({ stage: "Converting to HTML…", progress: 60, running: true });
+    publishProgress({ stage: "Converting to HTML…", percent: 60, running: true, phase: "prepare" });
     try {
       const result = await converterRef.current.toHtmlWithAssets(book, { mode: "inline" });
       const html = result.html;
       setLastHtml(html);
-      setConversion({ stage: "HTML ready.", progress: 100, running: false });
+      publishProgress({ stage: "HTML ready.", percent: 100, running: false, phase: "done" });
       toast.success("HTML generated.");
       return html;
     } catch (error) {
       console.error(error);
-      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
       toast.error("HTML conversion failed.");
       return "";
     }
-  }, [book]);
+  }, [book, publishProgress]);
 
   const downloadHtml = useCallback(async () => {
     if (!book) return;
-    setConversion({ stage: "Preparing HTML export…", progress: 65, running: true });
+    publishProgress({ stage: "Preparing HTML export…", percent: 65, running: true, phase: "prepare" });
     try {
       if (htmlExportMode === "inline") {
         const html = lastHtml || (await buildHtml());
@@ -354,48 +395,67 @@ function App() {
       console.error(error);
       toast.error("HTML export failed.");
     } finally {
-      setConversion({ stage: "Done.", progress: 100, running: false });
+      publishProgress({ stage: "Done.", percent: 100, running: false, phase: "done" });
     }
-  }, [baseName, book, buildHtml, htmlExportMode, lastHtml]);
+  }, [baseName, book, buildHtml, htmlExportMode, lastHtml, publishProgress]);
 
   const openPrintable = useCallback(async () => {
     if (!book) return;
-    setConversion({ stage: "Building printable view…", progress: 70, running: true });
+    publishProgress({ stage: "Building printable view…", percent: 70, running: true, phase: "prepare" });
     const html = lastHtml || (await buildHtml());
     if (!html) return;
     try {
-      setConversion({ stage: "Opening printable view…", progress: 95, running: true });
+      publishProgress({ stage: "Opening printable view…", percent: 95, running: true, phase: "finalize" });
       printRef.current.openPrintable(html, baseName);
-      setConversion({
+      publishProgress({
         stage: "Printable view opened. Use Print → Save as PDF.",
-        progress: 100,
+        percent: 100,
         running: false,
+        phase: "done",
       });
       toast.success("Printable view opened.");
     } catch (error) {
       console.error(error);
-      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
       toast.error("Failed to open printable view.");
     }
-  }, [baseName, book, buildHtml, lastHtml]);
+  }, [baseName, book, buildHtml, lastHtml, publishProgress]);
 
   const downloadPdf = useCallback(async () => {
     if (!book) return;
-    setConversion({ stage: "Building printable PDF…", progress: 72, running: true });
+    publishProgress({
+      stage: "Building printable PDF…",
+      percent: 72,
+      running: true,
+      phase: "prepare",
+      detail: "Preparing layout…",
+    });
     const html = lastHtml || (await buildHtml());
     if (!html) return;
     try {
-      setConversion({ stage: "Rendering PDF…", progress: 90, running: true });
-      const blob = await pdfRef.current.htmlToPdfBlob(html, { filename: `${baseName}.pdf` });
+      const blob = await pdfRef.current.htmlToPdfBlob(html, {
+        filename: `${baseName}.pdf`,
+        progress: publishProgress,
+      });
       downloadRef.current.downloadBlob(blob, `${baseName}.pdf`);
-      setConversion({ stage: "Done.", progress: 100, running: false });
+      publishProgress({ stage: "Done.", percent: 100, running: false, phase: "done" });
       toast.success("PDF generated and downloaded.");
     } catch (error) {
       console.error(error);
-      setConversion({ stage: `Error: ${(error as Error)?.message || error}`, progress: 0, running: false });
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
       toast.error("PDF generation failed.");
     }
-  }, [baseName, book, buildHtml, lastHtml]);
+  }, [baseName, book, buildHtml, lastHtml, publishProgress]);
 
   const downloadTxt = useCallback(() => {
     if (!lastTxt) return;
@@ -528,27 +588,32 @@ function App() {
             <CardContent className="space-y-4">
               <Alert className="border-primary/20 bg-primary/5">
                 <div className="flex items-start gap-3">
-                  {conversion.running ? (
+                  {progressSnapshot.running ? (
                     <Loader2 className="mt-0.5 h-4 w-4 animate-spin text-primary" />
-                  ) : conversion.stage.startsWith("Error") || conversion.stage.startsWith("Failed") ? (
+                  ) : progressSnapshot.stage.startsWith("Error") || progressSnapshot.stage.startsWith("Failed") ? (
                     <AlertTriangle className="mt-0.5 h-4 w-4 text-destructive" />
                   ) : (
                     <CheckCircle2 className="mt-0.5 h-4 w-4 text-primary" />
                   )}
                   <div>
                     <AlertTitle>Status</AlertTitle>
-                    <AlertDescription>{conversion.stage}</AlertDescription>
+                    <AlertDescription className="space-y-1">
+                      <span className="block">{progressSnapshot.stage}</span>
+                      {progressSnapshot.detail ? (
+                        <span className="block text-xs text-muted-foreground">{progressSnapshot.detail}</span>
+                      ) : null}
+                    </AlertDescription>
                   </div>
                 </div>
               </Alert>
 
-              {conversion.running && (
+              {progressSnapshot.running && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Conversion progress</span>
-                    <span>{conversion.progress}%</span>
+                    <span>{progressSnapshot.percent}%</span>
                   </div>
-                  <Progress value={conversion.progress} />
+                  <Progress value={progressSnapshot.percent} />
                 </div>
               )}
 

@@ -3,6 +3,7 @@ import ePub, { type Book } from "epubjs";
 import html2canvas from "html2canvas";
 import JSZip from "jszip";
 import { jsPDF } from "jspdf";
+import { ProgressPublishInput, WeightedProgress } from "./progress";
 
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string) =>
     Promise.race([
@@ -1067,7 +1068,7 @@ export class PrintService {
 }
 
 export class PdfService {
-  async htmlToPdfBlob(html: string, opts?: { filename?: string }) {
+  async htmlToPdfBlob(html: string, opts?: { filename?: string; progress?: (event: ProgressPublishInput) => void }) {
     const { title, styles, bodyHtml } = extractPrintableBody(html);
     const marginMm = 18;
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
@@ -1104,7 +1105,28 @@ export class PdfService {
     viewport.appendChild(content);
     document.body.appendChild(viewport);
 
+    const progress = opts?.progress;
+    const weighted = new WeightedProgress([
+      { phase: "prepare", weight: 0.05 },
+      { phase: "measure", weight: 0.05 },
+      { phase: "capture", weight: 0.8 },
+      { phase: "assemble", weight: 0.07 },
+      { phase: "finalize", weight: 0.03 },
+    ]);
+
+    const publish = (event: Omit<ProgressPublishInput, "percent"> & { percent: number }) => {
+      if (!progress) return;
+      progress(event);
+    };
+
     try {
+      publish({
+        running: true,
+        phase: "prepare",
+        percent: weighted.percentFor("prepare", 0),
+        stage: "Preparing PDF…",
+        detail: "Setting up render surface…",
+      });
       await nextFrame();
       await waitForFonts(document);
       await waitForImages(content);
@@ -1116,6 +1138,16 @@ export class PdfService {
 
       const totalHeightPx = content.scrollHeight;
       const pages = Math.max(1, Math.ceil(totalHeightPx / viewportHeightPx));
+
+      publish({
+        running: true,
+        phase: "measure",
+        percent: weighted.percentFor("measure", 1),
+        stage: "Measuring content…",
+        detail: `Found ${pages} ${pages === 1 ? "page" : "pages"}.`,
+        unit: { label: "pages", current: 0, total: pages },
+      });
+      await nextFrame();
 
       console.info(
         "[pdf] totalHeightPx",
@@ -1156,19 +1188,64 @@ export class PdfService {
 
         canvas.width = 0;
         canvas.height = 0;
+        const current = i + 1;
+        publish({
+          running: true,
+          phase: "capture",
+          percent: weighted.percentFor("capture", current / pages),
+          stage: "Exporting PDF…",
+          detail: `Capturing page ${current}/${pages}`,
+          unit: { label: "pages", current, total: pages },
+        });
         await nextFrame();
       }
+
+      publish({
+        running: true,
+        phase: "assemble",
+        percent: weighted.percentFor("assemble", 1),
+        stage: "Assembling PDF…",
+        detail: "Encoding pages…",
+        unit: { label: "pages", current: pages, total: pages },
+      });
 
       const blob = pdf.output("blob");
       if (!(blob instanceof Blob)) {
         throw new Error("PDF generation returned no data.");
       }
 
+      publish({
+        running: true,
+        phase: "finalize",
+        percent: weighted.percentFor("finalize", 1),
+        stage: "Finalizing PDF…",
+        detail: "Wrapping up download…",
+        unit: { label: "pages", current: pages, total: pages },
+      });
+
       if (opts?.filename) {
         Object.defineProperty(blob, "name", { value: filename });
       }
 
+      publish({
+        running: false,
+        phase: "done",
+        percent: 100,
+        stage: "PDF ready.",
+        detail: `Captured ${pages}/${pages} pages.`,
+        unit: { label: "pages", current: pages, total: pages },
+      });
+
       return blob;
+    } catch (error) {
+      publish({
+        running: false,
+        phase: "error",
+        percent: weighted.percentFor("finalize", 1),
+        stage: `PDF export failed.`,
+        detail: (error as Error)?.message || String(error),
+      });
+      throw error;
     } finally {
       viewport.remove();
     }
