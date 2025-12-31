@@ -1066,90 +1066,126 @@ export class PrintService {
 }
 
 export class PdfService {
-  async htmlToPdfBlob(html: string, title: string) {
-    const container = this.createContainer(html);
-    document.body.appendChild(container);
+  async htmlToPdfBlob(html: string, opts?: { filename?: string }) {
+    const { title, styles, bodyHtml } = extractPrintableBody(html);
+    const host = document.createElement("div");
+    host.setAttribute("data-pdf-host", "true");
+    host.style.position = "fixed";
+    host.style.left = "-100000px";
+    host.style.top = "0";
+    host.style.width = "794px";
+    host.style.visibility = "hidden";
+    host.style.pointerEvents = "none";
+    host.style.background = "#fff";
+    host.style.padding = "0";
+    host.style.margin = "0";
+    host.style.zIndex = "-1";
+    host.innerHTML = `
+      <style>${styles}</style>
+      <div data-pdf-root style="background:#fff; color:#111;">
+        ${bodyHtml}
+      </div>
+    `;
+
+    document.body.appendChild(host);
+
     try {
-      await this.waitForImages(container, 15000);
+      await nextFrame();
+      await waitForFonts(document);
+      await waitForImages(host);
+      await nextFrame();
+
+      const rect = host.getBoundingClientRect();
+      if (!rect.height || rect.height < 2) {
+        const computedStyle = window.getComputedStyle(host);
+        throw new Error(
+          `PDF render root has zero height (h=${rect.height}). display=${computedStyle.display}, visibility=${computedStyle.visibility}, position=${computedStyle.position}`
+        );
+      }
+
+      const filename =
+        opts?.filename ||
+        `${title.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 120) || "document"}.pdf`;
+
       const blob = await html2pdf()
-        .from(container)
+        .from(host)
         .set({
           margin: [18, 18, 18, 18],
-          filename: `${title || "book"}.pdf`,
-          image: { type: "jpeg", quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true, allowTaint: true },
-          jsPDF: { unit: "pt", format: "a4", orientation: "portrait" },
+          filename,
+          image: { type: "jpeg", quality: 0.95 },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            backgroundColor: "#ffffff",
+          },
+          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
           pagebreak: { mode: ["css", "legacy"] },
         })
         .outputPdf("blob");
+
       if (!(blob instanceof Blob)) {
         throw new Error("PDF generation returned no data.");
       }
+
       return blob;
     } finally {
-      container.remove();
+      host.remove();
     }
   }
+}
 
-  private async waitForImages(container: HTMLElement, timeoutMs: number) {
-    const images = Array.from(container.querySelectorAll("img"));
-    if (!images.length) return;
+const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
-    const loadPromises = images.map(
-      (img) =>
-        new Promise<void>((resolve, reject) => {
-          if (img.complete && img.naturalWidth > 0) {
-            resolve();
-            return;
-          }
-          const onLoad = () => {
-            cleanup();
-            resolve();
-          };
-          const onError = () => {
-            cleanup();
-            reject(new Error("One or more images failed to load for PDF export."));
-          };
-          const cleanup = () => {
-            img.removeEventListener("load", onLoad);
-            img.removeEventListener("error", onError);
-          };
-          img.addEventListener("load", onLoad);
-          img.addEventListener("error", onError);
-        })
-    );
+async function waitForImages(root: HTMLElement, timeoutMs = 20000) {
+  const images = Array.from(root.querySelectorAll("img"));
+  if (!images.length) return;
 
-    await Promise.race([
-      Promise.all(loadPromises),
-      new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error("Timed out waiting for images to load for PDF export.")), timeoutMs)
-      ),
-    ]);
-  }
+  const timeout = new Promise<void>((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout waiting for ${images.length} images`)), timeoutMs)
+  );
 
-  private createContainer(html: string) {
-    const parsed = new DOMParser().parseFromString(html, "text/html");
-    const container = document.createElement("div");
-    container.style.position = "fixed";
-    container.style.left = "-10000px";
-    container.style.top = "0";
-    container.style.width = "794px";
-    container.style.background = "#fff";
-
-    const styleText = Array.from(parsed.querySelectorAll("style"))
-      .map((style) => style.textContent || "")
-      .join("\n");
-    if (styleText.trim()) {
-      const style = document.createElement("style");
-      style.textContent = styleText;
-      container.appendChild(style);
+  const jobs = images.map(async (img) => {
+    if (img.complete && img.naturalWidth > 0) return;
+    try {
+      if (typeof img.decode === "function") {
+        await img.decode();
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        img.addEventListener("load", () => resolve(), { once: true });
+        img.addEventListener("error", () => reject(new Error("Image failed to load")), { once: true });
+      });
+    } catch {
+      await new Promise<void>((resolve) => {
+        if (img.complete) return resolve();
+        img.addEventListener("load", () => resolve(), { once: true });
+        img.addEventListener("error", () => resolve(), { once: true });
+      });
     }
+  });
 
-    const content = document.createElement("div");
-    content.innerHTML = parsed.body?.innerHTML || html;
-    container.appendChild(content);
-    return container;
-  }
+  await Promise.race([Promise.all(jobs).then(() => undefined), timeout]);
+}
+
+async function waitForFonts(doc: Document, timeoutMs = 20000) {
+  const anyDoc = doc as Document & { fonts?: { ready?: Promise<unknown> } };
+  if (!anyDoc.fonts?.ready) return;
+
+  const timeout = new Promise<void>((_, reject) =>
+    setTimeout(() => reject(new Error("Timeout waiting for fonts")), timeoutMs)
+  );
+  await Promise.race([anyDoc.fonts.ready.then(() => undefined), timeout]);
+}
+
+function extractPrintableBody(html: string) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const styles = Array.from(doc.querySelectorAll("style"))
+    .map((style) => style.textContent || "")
+    .join("\n");
+  const title = doc.title || "document";
+  const bodyHtml = doc.body?.innerHTML || html;
+
+  return { title, styles, bodyHtml };
 }
 
 export class FileNameService {

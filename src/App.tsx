@@ -386,7 +386,7 @@ function App() {
     if (!html) return;
     try {
       setConversion({ stage: "Rendering PDF…", progress: 90, running: true });
-      const blob = await pdfRef.current.htmlToPdfBlob(html, baseName);
+      const blob = await pdfRef.current.htmlToPdfBlob(html, { filename: `${baseName}.pdf` });
       downloadRef.current.downloadBlob(blob, `${baseName}.pdf`);
       setConversion({ stage: "Done.", progress: 100, running: false });
       toast.success("PDF generated and downloaded.");
