@@ -1054,11 +1054,21 @@ export class DownloadService {
 }
 
 export class PrintService {
-  openPrintable(html: string, title: string) {
-    const popup = window.open("", "_blank", "noopener,noreferrer");
+  openPopup(title: string) {
+    const popup = window.open("", "_blank");
     if (!popup) {
       throw new Error("Popup blocked. Allow popups to open printable view.");
     }
+    popup.document.open();
+    popup.document.write(
+      "<!doctype html><title>Loading printable view…</title><style>body{font-family:system-ui;margin:32px;color:#111}</style><p>Preparing printable view…</p>"
+    );
+    popup.document.close();
+    popup.document.title = title || "EPUB";
+    return popup;
+  }
+
+  renderPrintable(popup: Window, html: string, title: string) {
     popup.document.open();
     popup.document.write(html);
     popup.document.close();

@@ -263,6 +263,47 @@ function App() {
     });
   }, [publishProgress]);
 
+  const generateOutputs = useCallback(
+    async (loadedBook: Awaited<ReturnType<EpubConverter["loadBook"]>>, displayName: string) => {
+      publishProgress({
+        stage: `Generating HTML…`,
+        percent: 55,
+        running: true,
+        phase: "prepare",
+      });
+      try {
+        const htmlResult = await converterRef.current.toHtmlWithAssets(loadedBook, { mode: "inline" });
+        setLastHtml(htmlResult.html);
+        publishProgress({
+          stage: "Generating TXT…",
+          percent: 80,
+          running: true,
+          phase: "prepare",
+        });
+        const text = await converterRef.current.toTxt(loadedBook);
+        setLastTxt(text);
+        setOutputTab("preview");
+        publishProgress({
+          stage: `Ready. HTML + TXT generated for ${displayName}.`,
+          percent: 100,
+          running: false,
+          phase: "done",
+        });
+        toast.success("HTML and TXT ready.");
+      } catch (error) {
+        console.error(error);
+        publishProgress({
+          stage: `Error: ${(error as Error)?.message || error}`,
+          percent: 0,
+          running: false,
+          phase: "error",
+        });
+        toast.error("Automatic conversion failed.");
+      }
+    },
+    [publishProgress]
+  );
+
   const handleFile = useCallback(async (nextFile: File) => {
     setLastHtml("");
     setLastTxt("");
@@ -279,13 +320,8 @@ function App() {
       setFile(displayFile);
       const loadedBook = await converterRef.current.loadBook(buf);
       setBook(loadedBook);
-      publishProgress({
-        stage: `Loaded ${displayName}. Choose TXT, HTML, or PDF.`,
-        percent: 100,
-        running: false,
-        phase: "done",
-      });
       toast.success("EPUB loaded successfully.");
+      await generateOutputs(loadedBook, displayName);
     } catch (error) {
       console.error(error);
       publishProgress({
@@ -296,7 +332,7 @@ function App() {
       });
       toast.error("Failed to load the EPUB file.");
     }
-  }, [publishProgress]);
+  }, [generateOutputs, publishProgress]);
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]) => {
@@ -321,8 +357,16 @@ function App() {
 
   const baseName = useMemo(() => FileNameService.baseName(file), [file]);
 
-  const convertTxt = useCallback(async () => {
+  const downloadTxt = useCallback(async () => {
     if (!book) return;
+    if (lastTxt) {
+      downloadRef.current.downloadBlob(
+        new Blob([lastTxt], { type: "text/plain;charset=utf-8" }),
+        `${baseName}.txt`
+      );
+      toast.success("TXT downloaded.");
+      return;
+    }
     publishProgress({ stage: "Converting to TXT…", percent: 55, running: true, phase: "prepare" });
     try {
       const text = await converterRef.current.toTxt(book);
@@ -345,7 +389,7 @@ function App() {
       });
       toast.error("TXT conversion failed.");
     }
-  }, [baseName, book, publishProgress]);
+  }, [baseName, book, lastTxt, publishProgress]);
 
   const buildHtml = useCallback(async () => {
     if (!book) return "";
@@ -401,12 +445,29 @@ function App() {
 
   const openPrintable = useCallback(async () => {
     if (!book) return;
+    let popup: Window | null = null;
+    try {
+      popup = printRef.current.openPopup(baseName);
+    } catch (error) {
+      console.error(error);
+      publishProgress({
+        stage: `Error: ${(error as Error)?.message || error}`,
+        percent: 0,
+        running: false,
+        phase: "error",
+      });
+      toast.error("Failed to open printable view.");
+      return;
+    }
     publishProgress({ stage: "Building printable view…", percent: 70, running: true, phase: "prepare" });
     const html = lastHtml || (await buildHtml());
-    if (!html) return;
+    if (!html) {
+      popup.close();
+      return;
+    }
     try {
       publishProgress({ stage: "Opening printable view…", percent: 95, running: true, phase: "finalize" });
-      printRef.current.openPrintable(html, baseName);
+      printRef.current.renderPrintable(popup, html, baseName);
       publishProgress({
         stage: "Printable view opened. Use Print → Save as PDF.",
         percent: 100,
@@ -457,15 +518,6 @@ function App() {
     }
   }, [baseName, book, buildHtml, lastHtml, publishProgress]);
 
-  const downloadTxt = useCallback(() => {
-    if (!lastTxt) return;
-    downloadRef.current.downloadBlob(
-      new Blob([lastTxt], { type: "text/plain;charset=utf-8" }),
-      `${baseName}.txt`
-    );
-    toast.success("TXT downloaded.");
-  }, [baseName, lastTxt]);
-
   const copyOutput = useCallback(async () => {
     const content = outputTab === "html" ? lastHtml : lastTxt;
     if (!content) return;
@@ -504,6 +556,7 @@ function App() {
   }, [lastHtml, previewInIframe]);
 
   const copyDisabled = outputTab === "html" ? !lastHtml : !lastTxt;
+  const hasOutput = Boolean(lastHtml || lastTxt);
 
   return (
     <TooltipProvider>
@@ -621,13 +674,13 @@ function App() {
 
               <div className="sticky bottom-0 z-10 -mx-6 rounded-b-xl border-t bg-background/95 px-6 py-4 backdrop-blur sm:static sm:mx-0 sm:border-none sm:bg-transparent sm:px-0 sm:py-0">
                 <div className="flex flex-wrap gap-2">
-                  <Button onClick={convertTxt} disabled={!canRun}>
-                    <FileText className="h-4 w-4" />
-                    Convert to TXT
-                  </Button>
-                  <Button variant="secondary" onClick={downloadHtml} disabled={!canRun}>
+                  <Button onClick={downloadHtml} disabled={!canRun}>
                     <Download className="h-4 w-4" />
                     Download HTML
+                  </Button>
+                  <Button variant="secondary" onClick={downloadTxt} disabled={!canRun}>
+                    <FileText className="h-4 w-4" />
+                    Download TXT
                   </Button>
                   <Button variant="outline" onClick={openPrintable} disabled={!canRun}>
                     <Printer className="h-4 w-4" />
@@ -646,10 +699,6 @@ function App() {
                     </TooltipTrigger>
                     <TooltipContent>Reset file & output</TooltipContent>
                   </Tooltip>
-                  <Button variant="outline" onClick={downloadTxt} disabled={!lastTxt}>
-                    <Download className="h-4 w-4" />
-                    Download TXT
-                  </Button>
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
                   Tip: Download PDF or use Printable → Save as PDF for a clean copy. Large books may take a minute.
@@ -746,64 +795,66 @@ function App() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Output Preview</CardTitle>
-              <CardDescription>Inspect the generated text or HTML before downloading.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Tabs value={outputTab} onValueChange={setOutputTab}>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <TabsList>
-                    <TabsTrigger value="preview">Preview (TXT)</TabsTrigger>
-                    <TabsTrigger value="html">HTML</TabsTrigger>
-                  </TabsList>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setMonospace((prev) => !prev)}
-                      aria-pressed={monospace}
-                    >
-                      {monospace ? "Monospace on" : "Monospace off"}
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={copyOutput} disabled={copyDisabled}>
-                      Copy to clipboard
-                    </Button>
-                  </div>
-                </div>
-                <TabsContent value="preview">
-                  <Textarea
-                    readOnly
-                    value={outputPreview || "TXT output will appear here."}
-                    className={cn("min-h-[220px] resize-y", monospace && "font-mono")}
-                  />
-                </TabsContent>
-                <TabsContent value="html">
-                  {previewInIframe ? (
-                    <div className="min-h-[220px] overflow-hidden rounded-lg border">
-                      {iframeSrc ? (
-                        <iframe
-                          title="HTML preview"
-                          src={iframeSrc}
-                          className="min-h-[420px] w-full"
-                          sandbox="allow-same-origin"
-                        />
-                      ) : (
-                        <div className="p-4 text-sm text-muted-foreground">Generate HTML to preview it here.</div>
-                      )}
+          {hasOutput ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Output Preview</CardTitle>
+                <CardDescription>Inspect the generated text or HTML before downloading.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Tabs value={outputTab} onValueChange={setOutputTab}>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <TabsList>
+                      <TabsTrigger value="preview">Preview (TXT)</TabsTrigger>
+                      <TabsTrigger value="html">HTML</TabsTrigger>
+                    </TabsList>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setMonospace((prev) => !prev)}
+                        aria-pressed={monospace}
+                      >
+                        {monospace ? "Monospace on" : "Monospace off"}
+                      </Button>
+                      <Button variant="secondary" size="sm" onClick={copyOutput} disabled={copyDisabled}>
+                        Copy to clipboard
+                      </Button>
                     </div>
-                  ) : (
+                  </div>
+                  <TabsContent value="preview">
                     <Textarea
                       readOnly
-                      value={lastHtml || "Generate HTML to preview it here."}
-                      className="min-h-[220px] resize-y font-mono"
+                      value={outputPreview || "TXT output will appear here."}
+                      className={cn("min-h-[220px] resize-y", monospace && "font-mono")}
                     />
-                  )}
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-          </Card>
+                  </TabsContent>
+                  <TabsContent value="html">
+                    {previewInIframe ? (
+                      <div className="min-h-[220px] overflow-hidden rounded-lg border">
+                        {iframeSrc ? (
+                          <iframe
+                            title="HTML preview"
+                            src={iframeSrc}
+                            className="min-h-[420px] w-full"
+                            sandbox="allow-same-origin"
+                          />
+                        ) : (
+                          <div className="p-4 text-sm text-muted-foreground">Generate HTML to preview it here.</div>
+                        )}
+                      </div>
+                    ) : (
+                      <Textarea
+                        readOnly
+                        value={lastHtml || "Generate HTML to preview it here."}
+                        className="min-h-[220px] resize-y font-mono"
+                      />
+                    )}
+                  </TabsContent>
+                </Tabs>
+              </CardContent>
+            </Card>
+          ) : null}
         </main>
       </div>
     </TooltipProvider>
