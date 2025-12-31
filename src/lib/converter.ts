@@ -130,6 +130,15 @@ function resolveRelativePath(baseHref: string, ref: string): { path: string; fra
 }
 
 const OPF_DIR_CACHE = new WeakMap<Book, string>();
+const ZIP_INDEX_CACHE = new WeakMap<Book, Map<string, string>>();
+
+function safeDecodeURIComponent(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 function getOpfDir(book: Book): string {
   const cached = OPF_DIR_CACHE.get(book);
@@ -172,38 +181,124 @@ function getOpfDir(book: Book): string {
   return "";
 }
 
+function getZipIndex(book: Book): Map<string, string> {
+  const cached = ZIP_INDEX_CACHE.get(book);
+  if (cached) return cached;
+
+  const idx = new Map<string, string>();
+  const zip = (book as any)?.archive?.zip;
+  if (zip?.files && typeof zip.files === "object") {
+    for (const name of Object.keys(zip.files)) {
+      const decoded = safeDecodeURIComponent(name);
+      idx.set(name.toLowerCase(), name);
+      idx.set(decoded.toLowerCase(), name);
+    }
+  }
+
+  ZIP_INDEX_CACHE.set(book, idx);
+  return idx;
+}
+
+function sectionBaseHref(book: Book, sectionHref: string): string {
+  const opfDir = getOpfDir(book);
+  const clean = (sectionHref || "").replace(/^\/+/, "");
+  return `/${opfDir}${clean}`;
+}
+
 function uniq<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
 function candidateEpubPaths(book: Book, baseHref: string, ref: string): string[] {
-  if (!ref.startsWith("/")) {
-    return uniq(["/" + resolveRelativePath(baseHref, ref).path]);
-  }
-
-  const noLead = ref.replace(/^\/+/, "");
   const opfDir = getOpfDir(book);
-  const baseTop = baseHref.replace(/^\/+/, "").split("/")[0] || "";
-  const candidates = [
-    `/${noLead}`,
-    opfDir ? `/${opfDir}${noLead}` : "",
-    baseTop ? `/${baseTop}/${noLead}` : "",
-  ].filter(Boolean);
+  if (ref.startsWith("/")) {
+    const noLead = ref.replace(/^\/+/, "");
+    const candidates = [
+      `/${noLead}`,
+      opfDir ? `/${opfDir}${noLead}` : "",
+    ].filter(Boolean);
 
-  if (import.meta.env.DEV) {
-    console.info("[export-assets] root-relative candidates", {
-      ref,
-      baseHref,
-      opfDir,
-      candidates,
-    });
+    if (import.meta.env.DEV) {
+      console.info("[export-assets] root-relative candidates", {
+        ref,
+        baseHref,
+        opfDir,
+        candidates,
+      });
+    }
+
+    return uniq(candidates);
   }
 
-  return uniq(candidates);
+  const resolved = "/" + resolveRelativePath(baseHref, ref).path;
+  const resolvedNoLead = resolved.replace(/^\/+/, "");
+  return uniq([resolved, opfDir ? `/${opfDir}${resolvedNoLead}` : ""].filter(Boolean));
+}
+
+function stripQueryAndFragment(ref: string) {
+  return ref.split("#")[0].split("?")[0];
+}
+
+function normalizeLeadingSlash(path: string) {
+  const trimmed = path.trim();
+  if (!trimmed) return trimmed;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function looksLikeWindowsPath(ref: string) {
+  return /^[a-zA-Z]:\\/.test(ref);
+}
+
+function candidateArchiveUrls(
+  book: Book,
+  baseHref: string,
+  rawRef: string,
+  blobToOriginal: Map<string, string>
+) {
+  const ref = (rawRef || "").trim();
+  if (!ref || ref.startsWith("#")) return [];
+  if (looksLikeWindowsPath(ref)) return [];
+  if (/^(?:data:|https?:|mailto:|tel:|sms:)/i.test(ref)) return [];
+
+  if (ref.startsWith("blob:")) {
+    const original = blobToOriginal.get(ref);
+    if (!original) return [];
+    return [normalizeLeadingSlash(stripQueryAndFragment(original))];
+  }
+
+  const cleaned = stripQueryAndFragment(ref);
+  const baseCandidates = candidateEpubPaths(book, baseHref, cleaned).map((url) => normalizeLeadingSlash(url));
+  const opfDir = getOpfDir(book);
+  const expanded: string[] = [];
+
+  for (const candidate of baseCandidates) {
+    expanded.push(candidate);
+    const noLead = candidate.replace(/^\/+/, "");
+    if (opfDir && noLead && !noLead.toLowerCase().startsWith(opfDir.toLowerCase())) {
+      expanded.push(`/${opfDir}${noLead}`);
+    }
+  }
+
+  const zipIndex = getZipIndex(book);
+  const final: string[] = [];
+  for (const candidate of expanded) {
+    const key = safeDecodeURIComponent(candidate.replace(/^\/+/, "")).toLowerCase();
+    const exact = zipIndex.get(key);
+    if (exact) final.push(`/${exact}`);
+    final.push(candidate);
+  }
+
+  return Array.from(new Set(final));
 }
 
 type FetchedAsset = {
   blob: Blob;
+  mimeType: string;
+  sourcePathHint: string;
+};
+
+type FetchedDataUri = {
+  dataUri: string;
   mimeType: string;
   sourcePathHint: string;
 };
@@ -238,78 +333,50 @@ async function fetchAssetBlob(
   rawRef: string,
   blobToOriginal: Map<string, string>
 ): Promise<FetchedAsset | null> {
-  const ref = (rawRef || "").trim();
-  if (!ref || ref.startsWith("#")) return null;
+  const archive = (book as any)?.archive;
+  if (!archive?.getBlob) return null;
 
-  if (ref.startsWith("data:")) return null;
+  const candidates = candidateArchiveUrls(book, baseHref, rawRef, blobToOriginal);
+  if (!candidates.length) return null;
 
-  if (/^https?:/i.test(ref) || /^mailto:/i.test(ref) || /^tel:/i.test(ref) || /^sms:/i.test(ref)) {
-    return null;
-  }
-
-  if (ref.startsWith("blob:")) {
-    const original = blobToOriginal.get(ref);
-    const res = await fetch(ref);
-    if (!res.ok) throw new Error(`Failed to fetch blob asset (${res.status}): ${ref}`);
-    const blob = await res.blob();
-    const mimeType = blob.type || (original ? guessMimeFromPath(original) : "application/octet-stream");
-    return {
-      blob,
-      mimeType,
-      sourcePathHint: original || `blob-asset.${extFromMime(mimeType)}`,
-    };
-  }
-
-  const candidates = candidateEpubPaths(book, baseHref, ref);
-
-  const archive = book?.archive;
-  if (archive?.request) {
-    let lastError: unknown;
-    for (const epubPath of candidates) {
-      try {
-        const blob = await archive.request(epubPath, "blob");
-        if (!(blob instanceof Blob)) {
-          throw new Error(`Archive request did not return a Blob for ${epubPath}`);
-        }
-        const mimeType = blob.type || guessMimeFromPath(epubPath);
-        return { blob, mimeType, sourcePathHint: epubPath.replace(/^\/+/, "") };
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    const message = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(
-      `Failed to resolve EPUB asset. ref=${ref} baseHref=${baseHref} candidates=${candidates.join(
-        ", "
-      )} lastError=${message}`
-    );
-  }
-
-  if (!archive?.createUrl) {
-    throw new Error("EPUB archive is not available (book.archive.request missing).");
-  }
-
-  let lastError: unknown;
-  for (const epubPath of candidates) {
+  for (const url of candidates) {
     try {
-      const blobUrl = archive.createUrl(epubPath.replace(/^\/+/, ""));
-      const response = await fetch(blobUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch EPUB asset: ${epubPath} (${response.status})`);
-      }
-      const blob = await response.blob();
-      const mimeType = blob.type || guessMimeFromPath(epubPath);
-      return { blob, mimeType, sourcePathHint: epubPath.replace(/^\/+/, "") };
-    } catch (error) {
-      lastError = error;
+      const blob = await archive.getBlob(url);
+      if (!blob) continue;
+      const mimeType = blob.type || guessMimeFromPath(url);
+      return { blob, mimeType, sourcePathHint: url };
+    } catch {
+      // try next candidate
     }
   }
-  const message = lastError instanceof Error ? lastError.message : String(lastError);
-  throw new Error(
-    `Failed to resolve EPUB asset. ref=${ref} baseHref=${baseHref} candidates=${candidates.join(
-      ", "
-    )} lastError=${message}`
-  );
+
+  return null;
+}
+
+async function fetchAssetDataUri(
+  book: Book,
+  baseHref: string,
+  rawRef: string,
+  blobToOriginal: Map<string, string>
+): Promise<FetchedDataUri | null> {
+  const archive = (book as any)?.archive;
+  if (!archive?.getBase64) return null;
+
+  const candidates = candidateArchiveUrls(book, baseHref, rawRef, blobToOriginal);
+  if (!candidates.length) return null;
+
+  for (const url of candidates) {
+    try {
+      const dataUri = await archive.getBase64(url);
+      if (!dataUri) continue;
+      const mimeType = dataUri.slice(5).split(";", 1)[0] || guessMimeFromPath(url);
+      return { dataUri, mimeType, sourcePathHint: url };
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return null;
 }
 
 function sanitizeZipPath(path: string) {
@@ -378,39 +445,46 @@ async function rewriteHtmlAssetsForExport(
 
     if (srcAttr) {
       try {
-        const fetched = await fetchAssetBlob(book, baseHref, srcAttr, blobToOriginal);
-        if (!fetched) {
-          stats.skipped += 1;
-        } else if (mode === "inline") {
-          const dataUri = await blobToDataUri(fetched.blob);
-          if (el.hasAttribute("src")) el.setAttribute("src", dataUri);
-          else if (el.hasAttribute("href")) el.setAttribute("href", dataUri);
-          else el.setAttribute("xlink:href", dataUri);
-          stats.inlined += 1;
-        } else {
-          const safeHint = sanitizeZipPath(fetched.sourcePathHint);
-          const ext = extFromMime(fetched.mimeType);
-          const baseName = safeHint && safeHint.includes(".") ? safeHint : `${safeHint || "asset"}.${ext}`;
-          let zipPath = `assets/${baseName}`;
-          zipPath = sanitizeZipPath(zipPath);
-
-          if (usedZipPaths.has(zipPath)) {
-            const dot = zipPath.lastIndexOf(".");
-            const stem = dot >= 0 ? zipPath.slice(0, dot) : zipPath;
-            const suffix = dot >= 0 ? zipPath.slice(dot) : "";
-            let i = 2;
-            while (usedZipPaths.has(`${stem}-${i}${suffix}`)) i += 1;
-            zipPath = `${stem}-${i}${suffix}`;
+        if (mode === "inline") {
+          const fetched = await fetchAssetDataUri(book, baseHref, srcAttr, blobToOriginal);
+          if (!fetched) {
+            stats.skipped += 1;
+          } else {
+            const dataUri = fetched.dataUri;
+            if (el.hasAttribute("src")) el.setAttribute("src", dataUri);
+            else if (el.hasAttribute("href")) el.setAttribute("href", dataUri);
+            else el.setAttribute("xlink:href", dataUri);
+            stats.inlined += 1;
           }
-          usedZipPaths.add(zipPath);
+        } else {
+          const fetched = await fetchAssetBlob(book, baseHref, srcAttr, blobToOriginal);
+          if (!fetched) {
+            stats.skipped += 1;
+          } else {
+            const safeHint = sanitizeZipPath(fetched.sourcePathHint);
+            const ext = extFromMime(fetched.mimeType);
+            const baseName = safeHint && safeHint.includes(".") ? safeHint : `${safeHint || "asset"}.${ext}`;
+            let zipPath = `assets/${baseName}`;
+            zipPath = sanitizeZipPath(zipPath);
 
-          assets.set(zipPath, fetched.blob);
+            if (usedZipPaths.has(zipPath)) {
+              const dot = zipPath.lastIndexOf(".");
+              const stem = dot >= 0 ? zipPath.slice(0, dot) : zipPath;
+              const suffix = dot >= 0 ? zipPath.slice(dot) : "";
+              let i = 2;
+              while (usedZipPaths.has(`${stem}-${i}${suffix}`)) i += 1;
+              zipPath = `${stem}-${i}${suffix}`;
+            }
+            usedZipPaths.add(zipPath);
 
-          const rel = zipPath;
-          if (el.hasAttribute("src")) el.setAttribute("src", rel);
-          else if (el.hasAttribute("href")) el.setAttribute("href", rel);
-          else el.setAttribute("xlink:href", rel);
-          stats.inlined += 1;
+            assets.set(zipPath, fetched.blob);
+
+            const rel = zipPath;
+            if (el.hasAttribute("src")) el.setAttribute("src", rel);
+            else if (el.hasAttribute("href")) el.setAttribute("href", rel);
+            else el.setAttribute("xlink:href", rel);
+            stats.inlined += 1;
+          }
         }
       } catch (error) {
         console.warn("[export-assets] failed:", error);
@@ -425,16 +499,19 @@ async function rewriteHtmlAssetsForExport(
 
       for (const part of parts) {
         try {
-          const fetched = await fetchAssetBlob(book, baseHref, part.url, blobToOriginal);
-          if (!fetched) {
-            rewritten.push(part);
-            continue;
-          }
-
           if (mode === "inline") {
-            const dataUri = await blobToDataUri(fetched.blob);
-            rewritten.push({ url: dataUri, desc: part.desc });
+            const fetched = await fetchAssetDataUri(book, baseHref, part.url, blobToOriginal);
+            if (!fetched) {
+              rewritten.push(part);
+              continue;
+            }
+            rewritten.push({ url: fetched.dataUri, desc: part.desc });
           } else {
+            const fetched = await fetchAssetBlob(book, baseHref, part.url, blobToOriginal);
+            if (!fetched) {
+              rewritten.push(part);
+              continue;
+            }
             const safeHint = sanitizeZipPath(fetched.sourcePathHint);
             const ext = extFromMime(fetched.mimeType);
             const baseName = safeHint && safeHint.includes(".") ? safeHint : `${safeHint || "asset"}.${ext}`;
@@ -627,9 +704,10 @@ export class EpubConverter {
 
     for await (const { html, href } of this.iterateSpine(book)) {
       const safeHtml = this.sanitizer.sanitize(html);
+      const baseHref = sectionBaseHref(book, href);
       const cssInlined = await this.inlineStylesheetsInHtml({
         html: safeHtml,
-        baseHref: href,
+        baseHref,
         book,
         dataUriCache,
         cssCache,
@@ -637,7 +715,7 @@ export class EpubConverter {
       });
       const { html: rewritten, assets, stats: rewriteStats } = await rewriteHtmlAssetsForExport(
         book,
-        href,
+        baseHref,
         cssInlined,
         mode
       );
