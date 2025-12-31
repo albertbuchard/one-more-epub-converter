@@ -1126,23 +1126,37 @@ export class PdfService {
         pages
       );
 
+      const scale = 2;
+      const win = document.defaultView ?? window;
+
       for (let i = 0; i < pages; i += 1) {
         const y = i * viewportHeightPx;
-        content.style.transform = `translateY(-${y}px)`;
-        await nextFrame();
+        const sliceHeightPx = Math.min(viewportHeightPx, totalHeightPx - y);
 
-        const canvas = await html2canvas(viewport, {
-          scale: 2,
+        const canvas = await html2canvas(content, {
+          scale,
           useCORS: true,
           backgroundColor: "#ffffff",
           width: hostWidthPx,
-          height: viewportHeightPx,
+          height: sliceHeightPx,
+          x: 0,
+          y,
+          windowWidth: hostWidthPx,
+          windowHeight: sliceHeightPx,
+          scrollX: -win.scrollX,
+          scrollY: -win.scrollY,
+          logging: false,
         });
 
         const imgData = canvas.toDataURL("image/jpeg", 0.95);
+        const imgHmm = (sliceHeightPx / viewportHeightPx) * contentHmm;
 
         if (i > 0) pdf.addPage();
-        pdf.addImage(imgData, "JPEG", marginMm, marginMm, contentWmm, contentHmm, undefined, "FAST");
+        pdf.addImage(imgData, "JPEG", marginMm, marginMm, contentWmm, imgHmm, undefined, "FAST");
+
+        canvas.width = 0;
+        canvas.height = 0;
+        await nextFrame();
       }
 
       const blob = pdf.output("blob");
