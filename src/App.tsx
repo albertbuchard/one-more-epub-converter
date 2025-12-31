@@ -542,13 +542,15 @@ function App() {
                 </div>
               </Alert>
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Conversion progress</span>
-                  <span>{conversion.progress}%</span>
+              {conversion.running && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Conversion progress</span>
+                    <span>{conversion.progress}%</span>
+                  </div>
+                  <Progress value={conversion.progress} />
                 </div>
-                <Progress value={conversion.progress} />
-              </div>
+              )}
 
               <Separator />
 
@@ -595,50 +597,87 @@ function App() {
             <CardHeader>
               <CardTitle className="text-lg">HTML export options</CardTitle>
               <CardDescription>
-                Choose between a single self-contained HTML file or a ZIP with the same offline-ready HTML.
+                Pick the HTML package style you want, then download from the action bar.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  variant={htmlExportMode === "zip" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setHtmlExportMode("zip")}
-                  disabled={!book}
+            <CardContent className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div
+                  className={cn(
+                    "rounded-xl border p-4",
+                    htmlExportMode === "inline" ? "border-primary/60 bg-primary/5" : "border-border"
+                  )}
                 >
-                  ZIP (index.html only)
-                </Button>
-                <Button
-                  variant={htmlExportMode === "inline" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setHtmlExportMode("inline")}
-                  disabled={!book}
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">Single HTML file</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Fully self-contained HTML with images and styles inlined.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={htmlExportMode === "inline" ? "default" : "outline"}
+                      onClick={() => setHtmlExportMode("inline")}
+                      disabled={!book}
+                    >
+                      Select
+                    </Button>
+                  </div>
+                </div>
+                <div
+                  className={cn(
+                    "rounded-xl border p-4",
+                    htmlExportMode === "zip" ? "border-primary/60 bg-primary/5" : "border-border"
+                  )}
                 >
-                  Single HTML file
-                </Button>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">Offline HTML project (ZIP)</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Includes index.html plus an assets folder for offline viewing.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={htmlExportMode === "zip" ? "default" : "outline"}
+                      onClick={() => setHtmlExportMode("zip")}
+                      disabled={!book}
+                    >
+                      Select
+                    </Button>
+                  </div>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                <span className="font-medium text-foreground">Preview:</span>
-                <Button
-                  variant={previewInIframe ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setPreviewInIframe(true)}
-                  disabled={!book}
-                >
-                  Iframe
-                </Button>
-                <Button
-                  variant={!previewInIframe ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setPreviewInIframe(false)}
-                  disabled={!book}
-                >
-                  Raw HTML
-                </Button>
+
+              <div className="rounded-xl border p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold">Preview mode</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Iframe preview uses the self-contained HTML for reliable asset loading.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant={previewInIframe ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setPreviewInIframe(true)}
+                      disabled={!book}
+                    >
+                      Iframe
+                    </Button>
+                    <Button
+                      variant={!previewInIframe ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setPreviewInIframe(false)}
+                      disabled={!book}
+                    >
+                      Raw HTML
+                    </Button>
+                  </div>
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Iframe preview always uses the self-contained HTML for reliable asset loading.
-              </p>
             </CardContent>
           </Card>
 

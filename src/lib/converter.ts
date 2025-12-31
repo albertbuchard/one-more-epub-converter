@@ -1070,20 +1070,61 @@ export class PdfService {
     const container = this.createContainer(html);
     document.body.appendChild(container);
     try {
-      return await html2pdf()
+      await this.waitForImages(container, 15000);
+      const blob = await html2pdf()
         .from(container)
         .set({
           margin: [18, 18, 18, 18],
           filename: `${title || "book"}.pdf`,
           image: { type: "jpeg", quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
+          html2canvas: { scale: 2, useCORS: true, allowTaint: true },
           jsPDF: { unit: "pt", format: "a4", orientation: "portrait" },
           pagebreak: { mode: ["css", "legacy"] },
         })
         .outputPdf("blob");
+      if (!(blob instanceof Blob)) {
+        throw new Error("PDF generation returned no data.");
+      }
+      return blob;
     } finally {
       container.remove();
     }
+  }
+
+  private async waitForImages(container: HTMLElement, timeoutMs: number) {
+    const images = Array.from(container.querySelectorAll("img"));
+    if (!images.length) return;
+
+    const loadPromises = images.map(
+      (img) =>
+        new Promise<void>((resolve, reject) => {
+          if (img.complete && img.naturalWidth > 0) {
+            resolve();
+            return;
+          }
+          const onLoad = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = () => {
+            cleanup();
+            reject(new Error("One or more images failed to load for PDF export."));
+          };
+          const cleanup = () => {
+            img.removeEventListener("load", onLoad);
+            img.removeEventListener("error", onError);
+          };
+          img.addEventListener("load", onLoad);
+          img.addEventListener("error", onError);
+        })
+    );
+
+    await Promise.race([
+      Promise.all(loadPromises),
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for images to load for PDF export.")), timeoutMs)
+      ),
+    ]);
   }
 
   private createContainer(html: string) {
