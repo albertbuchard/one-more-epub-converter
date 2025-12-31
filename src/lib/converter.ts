@@ -130,9 +130,30 @@ type DataUriResult = {
 
 const IMAGE_MIME_PATTERN = /^image\//i;
 const INLINE_WARNING_PREFIX = "[inline]";
+const SKIP_URI_RE = /^(?:data:|blob:|https?:|mailto:|tel:|sms:)/i;
+const EXT_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  avif: "image/avif",
+};
 
 function isImageMimeType(mimeType: string) {
   return IMAGE_MIME_PATTERN.test(mimeType);
+}
+
+function isSkippableUri(value: string) {
+  const trimmed = value.trim();
+  return !trimmed || trimmed.startsWith("#") || SKIP_URI_RE.test(trimmed);
+}
+
+function guessMimeFromPath(path: string) {
+  const clean = path.split("?")[0].split("#")[0];
+  const ext = clean.includes(".") ? clean.split(".").pop()!.toLowerCase() : "";
+  return EXT_MIME[ext] || "application/octet-stream";
 }
 
 function resolveRelativePath(baseHref: string, ref: string): { path: string; fragment: string } {
@@ -335,12 +356,10 @@ export class EpubConverter {
     const doc = parser.parseFromString(html, "text/html");
     const root = doc.body ?? doc.documentElement;
 
-    const shouldIgnoreRef = (ref: string) => /^(data:|blob:|https?:)/i.test(ref);
-
     const inlineUrl = async (rawUrl: string | null): Promise<string | null> => {
-      if (!rawUrl) return null;
+      if (typeof rawUrl !== "string") return null;
       const trimmed = rawUrl.trim();
-      if (!trimmed || trimmed.startsWith("#") || shouldIgnoreRef(trimmed)) {
+      if (isSkippableUri(trimmed)) {
         return null;
       }
       const { path, fragment } = resolveRelativePath(baseHref, trimmed);
@@ -432,26 +451,14 @@ export class EpubConverter {
     return root.innerHTML;
   }
 
-  private inferMimeType(path: string) {
-    const clean = path.split("?")[0].split("#")[0];
-    const ext = clean.slice(clean.lastIndexOf(".") + 1).toLowerCase();
-    const map: Record<string, string> = {
-      jpg: "image/jpeg",
-      jpeg: "image/jpeg",
-      png: "image/png",
-      gif: "image/gif",
-      svg: "image/svg+xml",
-      webp: "image/webp",
-    };
-    return map[ext];
-  }
-
-  private blobToDataUri(blob: Blob): Promise<string> {
+  private async blobToDataUri(blob: Blob, mimeHint?: string): Promise<string> {
+    const typed =
+      mimeHint && blob.type !== mimeHint ? new Blob([await blob.arrayBuffer()], { type: mimeHint }) : blob;
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => reject(reader.error ?? new Error("Failed to read blob"));
-      reader.readAsDataURL(blob);
+      reader.readAsDataURL(typed);
     });
   }
 
@@ -518,17 +525,30 @@ export class EpubConverter {
       expectImage: true,
     });
     if (!asset) return null;
-    const dataUri = await this.blobToDataUri(asset.blob);
-    if (/^data:text\/(html|plain)/i.test(dataUri)) {
-      this.warnInlineOnce(warningCache, `html-data:${epubPath}`, `${INLINE_WARNING_PREFIX} fetched HTML instead of image`, {
-        baseHref,
-        ref,
-        epubPath,
-        contentType: asset.mimeType,
-      });
-      return null;
-    }
+    const dataUri = await this.blobToDataUri(asset.blob, asset.mimeType);
     return { dataUri, mimeType: asset.mimeType };
+  }
+
+  private async fetchFromEpubArchive(book: EpubBook, path: string): Promise<Blob> {
+    if (!book.archive?.createUrl) {
+      throw new Error("EPUB archive is not available (book.archive.createUrl missing).");
+    }
+
+    let normalized = typeof path === "string" ? path : String(path);
+    normalized = normalized.replace(/^\/+/, "");
+
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {
+      // ignore
+    }
+
+    const blobUrl = book.archive.createUrl(normalized);
+    const response = await fetch(blobUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch EPUB asset: ${normalized} (${response.status})`);
+    }
+    return await response.blob();
   }
 
   private async fetchEpubAsset({
@@ -546,43 +566,9 @@ export class EpubConverter {
     warningCache: Set<string>;
     expectImage: boolean;
   }) {
-    let fetchUrl = epubPath;
-    let revokeUrl = false;
-    const prefersArchive = book.archived === true || Boolean(book.archive?.createUrl);
-    if (prefersArchive && book.archive?.createUrl) {
-      fetchUrl = book.archive.createUrl(epubPath);
-      revokeUrl = fetchUrl.startsWith("blob:");
-    } else if (!prefersArchive && book.resolve) {
-      fetchUrl = book.resolve(epubPath);
-    } else if (book.archive?.createUrl) {
-      fetchUrl = book.archive.createUrl(epubPath);
-      revokeUrl = fetchUrl.startsWith("blob:");
-    }
-
     try {
-      const response = await fetch(fetchUrl);
-      if (!response.ok) {
-        this.warnInlineOnce(warningCache, `fetch:${epubPath}`, `${INLINE_WARNING_PREFIX} failed to fetch asset`, {
-          baseHref,
-          ref,
-          epubPath,
-          contentType: response.headers.get("content-type") ?? "unknown",
-        });
-        return null;
-      }
-      const blob = await response.blob();
-      const contentType = blob.type || "";
-      if (contentType === "text/html" || contentType === "text/plain") {
-        this.warnInlineOnce(warningCache, `html:${epubPath}`, `${INLINE_WARNING_PREFIX} fetched HTML instead of image`, {
-          baseHref,
-          ref,
-          epubPath,
-          contentType,
-        });
-        return null;
-      }
-
-      const inferred = blob.type || this.inferMimeType(epubPath) || "application/octet-stream";
+      const blob = await this.fetchFromEpubArchive(book, epubPath);
+      const inferred = blob.type || guessMimeFromPath(epubPath);
       if (expectImage && blob.size < 200 && !isImageMimeType(inferred)) {
         this.warnInlineOnce(warningCache, `small:${epubPath}`, `${INLINE_WARNING_PREFIX} skipping non-image asset`, {
           baseHref,
@@ -604,10 +590,6 @@ export class EpubConverter {
         error,
       });
       return null;
-    } finally {
-      if (revokeUrl) {
-        URL.revokeObjectURL(fetchUrl);
-      }
     }
   }
 
@@ -627,7 +609,7 @@ export class EpubConverter {
     warningCache: Set<string>;
   }) {
     const trimmed = href.trim();
-    if (!trimmed || /^(data:|blob:|https?:)/i.test(trimmed)) {
+    if (isSkippableUri(trimmed)) {
       return null;
     }
     const { path } = resolveRelativePath(sectionHref, trimmed);
@@ -675,10 +657,9 @@ export class EpubConverter {
     warningCache: Set<string>;
   }) {
     const rewriteUrl = async (rawUrl: string | null): Promise<string | null> => {
-      if (!rawUrl) return null;
+      if (typeof rawUrl !== "string") return null;
       const trimmed = rawUrl.trim();
-      if (!trimmed || trimmed.startsWith("#")) return rawUrl;
-      if (/^(data:|blob:|https?:)/i.test(trimmed)) return rawUrl;
+      if (isSkippableUri(trimmed)) return rawUrl;
       const { path, fragment } = resolveRelativePath(cssHref, trimmed);
       if (!path) return rawUrl;
 
