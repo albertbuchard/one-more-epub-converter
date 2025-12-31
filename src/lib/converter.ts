@@ -1,44 +1,7 @@
 import DOMPurify from "dompurify";
-import ePub from "epubjs";
+import ePub, { type Book } from "epubjs";
 import JSZip from "jszip";
 import html2pdf from "html2pdf.js";
-
-type EpubBook = ReturnType<typeof ePub> & {
-  spine: {
-    spineItems: Array<{
-      load: (loader: unknown) => Promise<{
-        document?: { body?: { innerHTML: string } };
-        contents?: string;
-        unload?: () => void;
-      }>;
-      document?: { body?: { innerHTML: string } };
-      contents?: string;
-      unload?: () => void;
-      href?: string;
-      url?: string;
-    }>;
-  };
-  package?: { metadata?: { title?: string } };
-  load?: (...args: unknown[]) => unknown;
-  resolve?: (path: string) => string;
-  archived?: boolean;
-  archive?: {
-    createUrl: (path: string) => string;
-    request?: (path: string, type: string) => Promise<Blob>;
-    urlCache?: Record<string, string>;
-  };
-
-  // important:
-  opened?: Promise<unknown>;
-  loaded?: {
-    spine?: Promise<unknown>;
-    manifest?: Promise<unknown>;
-    metadata?: Promise<unknown>;
-  };
-
-  ready?: Promise<void>;
-};
-
 
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string) =>
     Promise.race([
@@ -53,11 +16,11 @@ export class EpubRuntime {
     this.ready = true;
   }
 
-  openBook(arrayBuffer: ArrayBuffer) {
+  openBook(arrayBuffer: ArrayBuffer): Book {
     if (!this.ready) {
       throw new Error("EPUB runtime not initialized");
     }
-    return ePub(arrayBuffer) as EpubBook;
+    return ePub(arrayBuffer);
   }
 }
 
@@ -186,7 +149,7 @@ function extFromMime(mimeType: string) {
   return MIME_TO_EXT[normalized] || "bin";
 }
 
-function invertArchiveUrlCache(book: EpubBook) {
+function invertArchiveUrlCache(book: Book) {
   const out = new Map<string, string>();
   const cache = book?.archive?.urlCache;
   if (!cache || typeof cache !== "object") return out;
@@ -197,7 +160,7 @@ function invertArchiveUrlCache(book: EpubBook) {
 }
 
 async function fetchAssetBlob(
-  book: EpubBook,
+  book: Book,
   baseHref: string,
   rawRef: string,
   blobToOriginal: Map<string, string>
@@ -297,7 +260,7 @@ function serializeSrcset(entries: Array<{ url: string; desc: string }>) {
 }
 
 async function rewriteHtmlAssetsForExport(
-  book: EpubBook,
+  book: Book,
   baseHref: string,
   htmlFragment: string,
   mode: AssetMode
@@ -489,7 +452,7 @@ export class EpubConverter {
   constructor(private runtime: EpubRuntime, private sanitizer: HtmlSanitizer) {}
 
   async loadBook(arrayBuffer: ArrayBuffer) {
-    const book = this.runtime.openBook(arrayBuffer) as EpubBook;
+    const book = this.runtime.openBook(arrayBuffer);
 
     // Prefer opened; it's much less likely to hang than ready
     const opened = book.opened ?? book.ready ?? Promise.resolve();
@@ -505,7 +468,7 @@ export class EpubConverter {
     return book;
   }
 
-  private async *iterateSpine(book: EpubBook) {
+  private async *iterateSpine(book: Book) {
     const request = book.load?.bind(book);
     if (!request) throw new Error("book.load is missing");
 
@@ -530,12 +493,12 @@ export class EpubConverter {
     }
   }
 
-  async toHtml(book: EpubBook) {
+  async toHtml(book: Book) {
     const { html } = await this.buildHtmlForExport(book, "inline");
     return html;
   }
 
-  async toTxt(book: EpubBook) {
+  async toTxt(book: Book) {
     const chunks: string[] = [];
     for await (const { html } of this.iterateSpine(book)) {
       const safeHtml = this.sanitizer.sanitize(html);
@@ -548,7 +511,7 @@ export class EpubConverter {
     return text ? `${text}\n` : "";
   }
 
-  async toHtmlWithAssets(book: EpubBook, options: { mode: HtmlExportMode }) {
+  async toHtmlWithAssets(book: Book, options: { mode: HtmlExportMode }) {
     const mode = options.mode === "inline" ? "inline" : "zip";
     const { html, assets } = await this.buildHtmlForExport(book, mode);
 
@@ -560,7 +523,7 @@ export class EpubConverter {
     return { zipBlob, htmlPreview: html } as const;
   }
 
-  private async buildHtmlForExport(book: EpubBook, mode: AssetMode) {
+  private async buildHtmlForExport(book: Book, mode: AssetMode) {
     const sections: string[] = [];
     const dataUriCache = new Map<string, Promise<DataUriResult | null>>();
     const cssCache = new Map<string, Promise<string | null>>();
@@ -616,7 +579,7 @@ export class EpubConverter {
   }: {
     html: string;
     baseHref: string;
-    book: EpubBook;
+    book: Book;
     dataUriCache: Map<string, Promise<DataUriResult | null>>;
     cssCache: Map<string, Promise<string | null>>;
     warningCache: Set<string>;
@@ -681,7 +644,7 @@ export class EpubConverter {
     epubPath: string;
     baseHref: string;
     ref: string;
-    book: EpubBook;
+    book: Book;
     dataUriCache: Map<string, Promise<DataUriResult | null>>;
     warningCache: Set<string>;
   }) {
@@ -710,7 +673,7 @@ export class EpubConverter {
     epubPath: string;
     baseHref: string;
     ref: string;
-    book: EpubBook;
+    book: Book;
     warningCache: Set<string>;
   }): Promise<DataUriResult | null> {
     const asset = await this.fetchEpubAsset({
@@ -726,7 +689,7 @@ export class EpubConverter {
     return { dataUri, mimeType: asset.mimeType };
   }
 
-  private async fetchFromEpubArchive(book: EpubBook, path: string): Promise<Blob> {
+  private async fetchFromEpubArchive(book: Book, path: string): Promise<Blob> {
     if (!book.archive?.createUrl) {
       throw new Error("EPUB archive is not available (book.archive.createUrl missing).");
     }
@@ -759,7 +722,7 @@ export class EpubConverter {
     epubPath: string;
     baseHref: string;
     ref: string;
-    book: EpubBook;
+    book: Book;
     warningCache: Set<string>;
     expectImage: boolean;
   }) {
@@ -800,7 +763,7 @@ export class EpubConverter {
   }: {
     href: string;
     sectionHref: string;
-    book: EpubBook;
+    book: Book;
     dataUriCache: Map<string, Promise<DataUriResult | null>>;
     cssCache: Map<string, Promise<string | null>>;
     warningCache: Set<string>;
@@ -849,7 +812,7 @@ export class EpubConverter {
   }: {
     cssText: string;
     cssHref: string;
-    book: EpubBook;
+    book: Book;
     dataUriCache: Map<string, Promise<DataUriResult | null>>;
     warningCache: Set<string>;
   }) {
