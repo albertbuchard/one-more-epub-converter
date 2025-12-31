@@ -1074,12 +1074,11 @@ export class PdfService {
     host.style.left = "-100000px";
     host.style.top = "0";
     host.style.width = "794px";
-    host.style.visibility = "hidden";
     host.style.pointerEvents = "none";
-    host.style.background = "#fff";
+    host.style.background = "#ffffff";
     host.style.padding = "0";
     host.style.margin = "0";
-    host.style.zIndex = "-1";
+    host.style.zIndex = "2147483647";
     host.innerHTML = `
       <style>${styles}</style>
       <div data-pdf-root style="background:#fff; color:#111;">
@@ -1096,10 +1095,11 @@ export class PdfService {
       await nextFrame();
 
       const rect = host.getBoundingClientRect();
+      console.info("[pdf] host rect", rect, "scrollHeight", host.scrollHeight, "offsetHeight", host.offsetHeight);
       if (!rect.height || rect.height < 2) {
         const computedStyle = window.getComputedStyle(host);
         throw new Error(
-          `PDF render root has zero height (h=${rect.height}). display=${computedStyle.display}, visibility=${computedStyle.visibility}, position=${computedStyle.position}`
+          `PDF root has zero height (h=${rect.height}). display=${computedStyle.display}, visibility=${computedStyle.visibility}, opacity=${computedStyle.opacity}`
         );
       }
 
