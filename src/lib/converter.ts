@@ -1,7 +1,8 @@
 import DOMPurify from "dompurify";
 import ePub, { type Book } from "epubjs";
+import html2canvas from "html2canvas";
 import JSZip from "jszip";
-import html2pdf from "html2pdf.js";
+import { jsPDF } from "jspdf";
 
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string) =>
     Promise.race([
@@ -1068,68 +1069,94 @@ export class PrintService {
 export class PdfService {
   async htmlToPdfBlob(html: string, opts?: { filename?: string }) {
     const { title, styles, bodyHtml } = extractPrintableBody(html);
-    const host = document.createElement("div");
-    host.setAttribute("data-pdf-host", "true");
-    host.style.position = "fixed";
-    host.style.left = "-100000px";
-    host.style.top = "0";
-    host.style.width = "794px";
-    host.style.pointerEvents = "none";
-    host.style.background = "#ffffff";
-    host.style.padding = "0";
-    host.style.margin = "0";
-    host.style.zIndex = "2147483647";
-    host.innerHTML = `
-      <style>${styles}</style>
-      <div data-pdf-root style="background:#fff; color:#111;">
-        ${bodyHtml}
-      </div>
-    `;
+    const marginMm = 18;
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pageWmm = pdf.internal.pageSize.getWidth();
+    const pageHmm = pdf.internal.pageSize.getHeight();
+    const contentWmm = pageWmm - 2 * marginMm;
+    const contentHmm = pageHmm - 2 * marginMm;
 
-    document.body.appendChild(host);
+    const hostWidthPx = 794;
+    const viewportHeightPx = Math.round((contentHmm * hostWidthPx) / contentWmm);
+
+    const viewport = document.createElement("div");
+    viewport.setAttribute("data-pdf-viewport", "true");
+    viewport.style.position = "fixed";
+    viewport.style.left = "-100000px";
+    viewport.style.top = "0";
+    viewport.style.width = `${hostWidthPx}px`;
+    viewport.style.height = `${viewportHeightPx}px`;
+    viewport.style.overflow = "hidden";
+    viewport.style.background = "#ffffff";
+    viewport.style.pointerEvents = "none";
+    viewport.style.zIndex = "2147483647";
+
+    const content = document.createElement("div");
+    content.setAttribute("data-pdf-content", "true");
+    content.style.width = `${hostWidthPx}px`;
+    content.style.background = "#ffffff";
+    content.style.color = "#111";
+    content.style.transform = "translateY(0px)";
+    content.style.transformOrigin = "top left";
+
+    content.innerHTML = `<style>${styles}</style><div>${bodyHtml}</div>`;
+
+    viewport.appendChild(content);
+    document.body.appendChild(viewport);
 
     try {
       await nextFrame();
       await waitForFonts(document);
-      await waitForImages(host);
+      await waitForImages(content);
       await nextFrame();
-
-      const rect = host.getBoundingClientRect();
-      console.info("[pdf] host rect", rect, "scrollHeight", host.scrollHeight, "offsetHeight", host.offsetHeight);
-      if (!rect.height || rect.height < 2) {
-        const computedStyle = window.getComputedStyle(host);
-        throw new Error(
-          `PDF root has zero height (h=${rect.height}). display=${computedStyle.display}, visibility=${computedStyle.visibility}, opacity=${computedStyle.opacity}`
-        );
-      }
 
       const filename =
         opts?.filename ||
         `${title.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 120) || "document"}.pdf`;
 
-      const blob = await html2pdf()
-        .from(host)
-        .set({
-          margin: [18, 18, 18, 18],
-          filename,
-          image: { type: "jpeg", quality: 0.95 },
-          html2canvas: {
-            scale: 2,
-            useCORS: true,
-            backgroundColor: "#ffffff",
-          },
-          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-          pagebreak: { mode: ["css", "legacy"] },
-        })
-        .outputPdf("blob");
+      const totalHeightPx = content.scrollHeight;
+      const pages = Math.max(1, Math.ceil(totalHeightPx / viewportHeightPx));
 
+      console.info(
+        "[pdf] totalHeightPx",
+        totalHeightPx,
+        "viewportHeightPx",
+        viewportHeightPx,
+        "pages",
+        pages
+      );
+
+      for (let i = 0; i < pages; i += 1) {
+        const y = i * viewportHeightPx;
+        content.style.transform = `translateY(-${y}px)`;
+        await nextFrame();
+
+        const canvas = await html2canvas(viewport, {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: "#ffffff",
+          width: hostWidthPx,
+          height: viewportHeightPx,
+        });
+
+        const imgData = canvas.toDataURL("image/jpeg", 0.95);
+
+        if (i > 0) pdf.addPage();
+        pdf.addImage(imgData, "JPEG", marginMm, marginMm, contentWmm, contentHmm, undefined, "FAST");
+      }
+
+      const blob = pdf.output("blob");
       if (!(blob instanceof Blob)) {
         throw new Error("PDF generation returned no data.");
       }
 
+      if (opts?.filename) {
+        Object.defineProperty(blob, "name", { value: filename });
+      }
+
       return blob;
     } finally {
-      host.remove();
+      viewport.remove();
     }
   }
 }
